@@ -1,0 +1,106 @@
+---
+title: "2052023_ATAC_QC_for_shallowsequencing"
+author: "Joanna Yeung"
+date: "2/5/2023"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(GenomicRanges)
+library(rtracklayer)
+library(chromVAR)
+library(DESeq2)
+library(pheatmap)
+library(ggplot2)
+library(RColorBrewer)
+library(cowplot)
+```
+
+```{r}
+setwd("/lustre/fs4/risc_lab/scratch/jyeung/LS_PDvsDoxo_2/ATACseq/ATACseq_pipeline")
+# read in sample names
+samplenames <- read.delim("samples.txt", header=F)
+# convert sample names to vector class
+samplenames <- samplenames$V1
+# read in summits.bed file for samples (these are the peaks we want for each sample)
+peakdir <- vector(length=nrow(samplenames))
+for(i in 1:nrow(samplenames)){
+peakdir[i] <- dir(path=paste0(samplenames[i, ], "/peakCalls"), pattern="_summits.bed")
+}
+
+# import summits.bed file into R: 
+  # resize the peak to be 500bp, fixed around the summit. 
+  # change name column to be chr:start-end coordinates
+  # add sample column denoting which sample peak came from. 
+masterpeaks <- list()
+for(i in 1:length(peakdir)){
+  masterpeaks[[i]] <- import.bed(paste0(samplenames[i, ], "/peakCalls/", peakdir[i]))
+  masterpeaks[[i]] <- resize(masterpeaks[[i]], fix="center", width=500)
+  masterpeaks[[i]]$name <- paste0(seqnames(masterpeaks[[i]]), ":", start(masterpeaks[[i]]), "-", end(masterpeaks[[i]]))
+  masterpeaks[[i]]$sample <- samplenames[i]
+}
+# convert masterpeaks to GRangesList class so that it can be unlisted and reduced down to a non-redundant master peak set. 
+masterpeaks <- GRangesList(masterpeaks)
+reducedmasterpeaks <- unlist(masterpeaks)
+reducedmasterpeaks <- GenomicRanges::reduce(reducedmasterpeaks)
+
+# count fragments under peaks from reducedmasterpeaks
+fragCounts <- chromVAR::getCounts(paste0(samplenames,"/",bamDir), reducedmasterpeaks, paired=TRUE, by_rg=FALSE, format="bam")
+# convert fragCounts to numeric matrix of fragment counts under peaks
+fragCounts <- SummarizedExperiment::assays(fragCounts)[[1]] # convert fragment Counts into counts matrix
+# change column names to samplenames
+colnames(fragCounts) <- samplenames
+# change row names to peak coordinates. 
+rownames(fragCounts) <- paste0(seqnames(reducedmasterpeaks), ":", start(reducedmasterpeaks), "-", end(reducedmasterpeaks))
+```
+
+```{r}
+# make metaData dataframe containing information on sample names, Condition and bioogical replicate. 
+metaData <- data.frame(sample=samplenames, Condition=c(rep("Cycling", 6), rep("day14-Doxo", 2), rep("day14-Palbo", 3), rep("day21-Doxo", 4), rep("day21-Palbo", 6), rep("day28-Palbo", 6), rep("day3-Doxo", 6), rep("day3-Palbo", 5)), Biorep= c(rep(1, 3), rep(2, 3), rep(3, 5), rep(1, 3), 2, rep(1, 3), rep(2, 3), rep(1, 3), rep(2, 3), rep(1, 3), rep(2, 3), rep(1, 2), rep(2, 3)))
+```
+
+```{r}
+# make DESeq object from fragCounts matrix
+dds <- DESeq2::DESeqDataSetFromMatrix(countData=fragCounts, design=~Condition, colData= metaData)
+# keep only peaks with a sum of > 10 read counts across rows. 
+keep <- rowSums(counts(dds)) >= 10
+dds <- dds[keep,]
+# rlog normalize for QC metrics visualization
+rlogdds <- rlog(dds)
+```
+```{r}
+# get pearson correlation coefficients for pairwise comparisons between samples
+sampleDists <- dist(t(assay(rlogdds))) # get rlog normalized count matrix & convert to distance measure for calculating correlations. 
+sampleDists <- as.dist(1 - sampleDists)
+sampleDistMatrix <- as.matrix(sampleDists)
+cor.matrix <-cor(sampleDistMatrix, method="pearson") # measure correlation 
+pheatmap(cor.matrix) # plot correlation heatmap
+```
+
+```{r}
+# add in treatment info for PCA plotting
+colData(rlogdds)$Treatment <- c(
+  rep("None", 6), rep("Doxo", 2), rep("Palbo", 3), rep("Doxo", 4), rep("Palbo", 12), rep("Doxo", 6), rep("Palbo", 5)
+)
+# add in timepoint info for PCA plotting
+colData(rlogdds)$Timepoint <- c(
+ rep(0, 6), rep(14, 5), rep(21, 10), rep(28, 6), rep(3, 11)
+)
+# plot PCA: 
+  # by treatment
+PCA1 <- plotPCA(rlogdds, intgroup=c("Treatment"))+theme_classic()
+  # by treatment & timepoint
+PCA2 <- plotPCA(rlogdds, intgroup=c("Treatment", "Timepoint"))+theme_classic()
+  # plot only Palbo samples, by treatment, timepoint & biological replicate
+PCA3 <- plotPCA(rlogdds[ ,c(1:5, which(grepl("Palbo", colnames(rlogdds))))], intgroup=c("Treatment", "Timepoint", "Biorep"))+theme_classic()
+  # plot only Doxo samples, by treatment, timepoint & biological replicate
+PCA4 <- plotPCA(rlogdds[ ,c(1:5, which(grepl("Doxo", colnames(rlogdds))))], intgroup=c("Treatment", "Timepoint", "Biorep"))+theme_classic()
+```
+
+```{r}
+plot_grid(PCA1, PCA2, PCA3, PCA4)
+```
