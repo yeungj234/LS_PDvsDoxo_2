@@ -18,8 +18,28 @@ library(pheatmap)
 library(ggplot2)
 library(RColorBrewer)
 library(cowplot)
+library(sva)
+library(preprocessCore)
+library(viridis)
+library(scales)
+```
+# manually set desired color schemes
+```{r}
+# color scheme for Palbo timepoints & biological replicates
+Pcols <- c("None:0:1"="#F8766D", "None:0:2"="#FBADA7", "Palbo:14:1"="#E0ADCD", "Palbo:21:1"="#B23282", "Palbo:21:2"="#4C0E35", "Palbo:28:1"="#72BBC2", "Palbo:28:2"="#148D99", "Palbo:3:1"="#D6C3C0", "Palbo:3:2"="#9D8E8A")
+# color scheme for Doxo timepoints & biological replicates
+Dcols <- c("None:0:1"="#F8766D", "None:0:2"="#FBADA7", "Doxo:14:1"="#B3C543", "Doxo:21:1"="#6F7835", "Doxo:21:2"="#383C1B", "Doxo:3:1"="#D7AB33", "Doxo:3:2"="#EBD599")
+
+# color scheme for treatment and timepoint 
+TTcols <- c("None:0"="#F8766D", "Doxo:14"="#B3C543", "Doxo:21"="#6F7835", "Doxo:3"="#EBD599", "Palbo:14"="#E0ADCD", "Palbo:21"="#B23282", "Palbo:28"="#72BBC2", "Palbo:3"="#9D8E8A")
+
+# color scheme for pheatmap annotation
+hm_cols <- list(Timepoint=c("0"="#440154FF", "3"="#3B528BFF", "14"="#21908CFF", "21"="#5DC863FF", "28"="#FDE725FF"), 
+                Treatment=c("None"="#F8766D", "Doxo"="#B3C543", "Palbo"="#E0ADCD"), 
+                Biorep=c("1"="orange", "2"="light blue"))
 ```
 
+### generate non-redundant master peak set
 ```{r}
 setwd("/lustre/fs4/risc_lab/scratch/jyeung/LS_PDvsDoxo_2/ATACseq/ATACseq_pipeline")
 # read in sample names
@@ -47,7 +67,10 @@ for(i in 1:length(peakdir)){
 masterpeaks <- GRangesList(masterpeaks)
 reducedmasterpeaks <- unlist(masterpeaks)
 reducedmasterpeaks <- GenomicRanges::reduce(reducedmasterpeaks)
-
+```
+### count reads under peaks
+```{r}
+setwd("/lustre/fs4/risc_lab/scratch/jyeung/LS_PDvsDoxo_2/ATACseq/ATACseq_pipeline")
 # count fragments under peaks from reducedmasterpeaks
 fragCounts <- chromVAR::getCounts(paste0(samplenames,"/",bamDir), reducedmasterpeaks, paired=TRUE, by_rg=FALSE, format="bam")
 # convert fragCounts to numeric matrix of fragment counts under peaks
@@ -58,49 +81,286 @@ colnames(fragCounts) <- samplenames
 rownames(fragCounts) <- paste0(seqnames(reducedmasterpeaks), ":", start(reducedmasterpeaks), "-", end(reducedmasterpeaks))
 ```
 
+### make DESeq object
 ```{r}
 # make metaData dataframe containing information on sample names, Condition and bioogical replicate. 
-metaData <- data.frame(sample=samplenames, Condition=c(rep("Cycling", 6), rep("day14-Doxo", 2), rep("day14-Palbo", 3), rep("day21-Doxo", 4), rep("day21-Palbo", 6), rep("day28-Palbo", 6), rep("day3-Doxo", 6), rep("day3-Palbo", 5)), Biorep= c(rep(1, 3), rep(2, 3), rep(3, 5), rep(1, 3), 2, rep(1, 3), rep(2, 3), rep(1, 3), rep(2, 3), rep(1, 3), rep(2, 3), rep(1, 2), rep(2, 3)))
-```
+metaData <- data.frame(sample=samplenames, 
+  Condition=c(rep("Cycling", 6), rep("day14-Doxo", 2), rep("day14-Palbo", 3), rep("day21-Doxo", 4), rep("day21-Palbo", 6), rep("day28-Palbo", 6), rep("day3-Doxo", 6), rep("day3-Palbo", 5)), 
+  Biorep= as.factor(c(rep(1, 3), rep(2, 3), rep(1, 5), rep(1, 3), 2, rep(1, 3), rep(2, 3), rep(1, 3), rep(2, 3), rep(1, 3), rep(2, 3), rep(1, 2), rep(2, 3))), 
+  Treatment=as.factor(c(
+  rep("None", 6), rep("Doxo", 2), rep("Palbo", 3), rep("Doxo", 4), rep("Palbo", 12), rep("Doxo", 6), rep("Palbo", 5))), 
+  Timepoint=as.factor(c(rep(0, 6), rep(14, 5), rep(21, 10), rep(28, 6), rep(3, 11))))
 
-```{r}
 # make DESeq object from fragCounts matrix
 dds <- DESeq2::DESeqDataSetFromMatrix(countData=fragCounts, design=~Condition, colData= metaData)
 # keep only peaks with a sum of > 10 read counts across rows. 
 keep <- rowSums(counts(dds)) >= 10
 dds <- dds[keep,]
+dds <- estimateSizeFactors(dds)
 # rlog normalize for QC metrics visualization
 rlogdds <- rlog(dds)
 ```
+
+# plot pearson correlation coefficients & PCA across sample pairs for rlog normalized counts under peaks with rowSums >=10
+
+### plot pearson correlation coefficients on distance measures of rlog normalized counts across samples
 ```{r}
 # get pearson correlation coefficients for pairwise comparisons between samples
 sampleDists <- dist(t(assay(rlogdds))) # get rlog normalized count matrix & convert to distance measure for calculating correlations. 
 sampleDists <- as.dist(1 - sampleDists)
 sampleDistMatrix <- as.matrix(sampleDists)
-cor.matrix <-cor(sampleDistMatrix, method="pearson") # measure correlation 
-pheatmap(cor.matrix) # plot correlation heatmap
-```
+cor.matrix <-cor(sampleDistMatrix, method="spearman") # measure correlation 
+# plot sample correlation matrix
+pheatmap(cor.matrix, annotation_row = as.data.frame(colData(rlogdds))[ ,3:5], annotation_col = as.data.frame(colData(rlogdds))[ ,3:5], annotation_colors = hm_cols) # plot correlation heatmap
 
+sampleCor <- cor(assay(rlogdds), method="pearson")
+sampleDists <- as.dist(1 - sampleCor)
+pheatmap(sampleDists, annotation_row = as.data.frame(colData(rlogdds))[ ,3:5], annotation_col = as.data.frame(colData(rlogdds))[ ,3:5], annotation_colors = hm_cols) # plot correlation heatmap
+
+# get pearson correlation coefficients for pairwise comparisons between samples, this time with only positive integers for rlog normalized counts (by adding 3 to each count)
+rlogdds_pos <- apply(assay(rlogdds), 2, function(x) x+3)
+sampleDists_pos <- dist(t(rlogdds_pos)) # get rlog normalized count matrix & convert to distance measure for calculating correlations. 
+sampleDists_pos <- as.dist(1 - sampleDists_pos)
+sampleDistMatrix_pos <- as.matrix(sampleDists_pos)
+cor.matrix_pos <-cor(sampleDistMatrix_pos, method="pearson") # measure correlation 
+# plot sample correlation matrix
+pheatmap(cor.matrix_pos, annotation_row = as.data.frame(colData(rlogdds))[ ,3:5], annotation_colors = hm_cols)
+```
+### plot PCA:
 ```{r}
-# add in treatment info for PCA plotting
-colData(rlogdds)$Treatment <- c(
-  rep("None", 6), rep("Doxo", 2), rep("Palbo", 3), rep("Doxo", 4), rep("Palbo", 12), rep("Doxo", 6), rep("Palbo", 5)
-)
-# add in timepoint info for PCA plotting
-colData(rlogdds)$Timepoint <- c(
- rep(0, 6), rep(14, 5), rep(21, 10), rep(28, 6), rep(3, 11)
-)
-# plot PCA: 
   # by treatment
-PCA1 <- plotPCA(rlogdds, intgroup=c("Treatment"))+theme_classic()
+PCA1 <- plotPCA(rlogdds, intgroup=c("Treatment"))+theme_classic()+ggtitle("fragCounts with rowSums >=10")
   # by treatment & timepoint
-PCA2 <- plotPCA(rlogdds, intgroup=c("Treatment", "Timepoint"))+theme_classic()
+PCA2 <- plotPCA(rlogdds, intgroup=c("Treatment", "Timepoint"))+theme_classic()+scale_color_manual(values=TTcols)+ggtitle("fragCounts with rowSums >=10")
   # plot only Palbo samples, by treatment, timepoint & biological replicate
-PCA3 <- plotPCA(rlogdds[ ,c(1:5, which(grepl("Palbo", colnames(rlogdds))))], intgroup=c("Treatment", "Timepoint", "Biorep"))+theme_classic()
+PCA3 <- plotPCA(rlogdds[ ,c(1:5, which(grepl("Palbo", colnames(rlogdds))))], intgroup=c("Treatment", "Timepoint", "Biorep"))+theme_classic()+ggtitle("fragCounts with rowSums >=10")
   # plot only Doxo samples, by treatment, timepoint & biological replicate
-PCA4 <- plotPCA(rlogdds[ ,c(1:5, which(grepl("Doxo", colnames(rlogdds))))], intgroup=c("Treatment", "Timepoint", "Biorep"))+theme_classic()
+PCA4 <- plotPCA(rlogdds[ ,c(1:5, which(grepl("Doxo", colnames(rlogdds))))], intgroup=c("Treatment", "Timepoint", "Biorep"))+theme_classic()+ggtitle("fragCounts with rowSums >=10")
 ```
 
 ```{r}
-plot_grid(PCA1, PCA2, PCA3, PCA4)
+# saved as PCA_and_cor.matrix.pdf under C:\Users\Joanna Yeung\Dropbox (Dropbox @RU)\Risca Laboratory\Risca Laboratory\Users\Joanna\Work_In_Progress\Senescence Project\Experiments\LS_PDvsDoxo_2\ATACseq\01182022_NextSeqRun
+
+# plot PCA plots and sample correlation matrix together
+plot_grid(PCA1, PCA2, PCA3, PCA4, pheatmap(cor.matrix, annotation_row = as.data.frame(colData(rlogdds))[ ,3:5], annotation_col = as.data.frame(colData(rlogdds))[ ,3:5])[[4]])
 ```
+
+# plot pearson correlation coefficients & PCA across sample pairs for rlog normalized counts under peaks with rowSums >=40
+
+### plot pearson correlation coefficients on distance measures of rlog normalized counts across samples
+```{r}
+# I realize that since I have so many samples (38 samples), it would make sense to keep rowSums of > 38 
+keep <- rowSums(counts(dds)) >= 40
+dds_40 <- dds[keep,]
+# rlog normalize for QC metrics visualization
+rlogdds_40 <- rlog(dds_40)
+sampleDists_40 <- dist(t(assay(rlogdds_40))) # get rlog normalized count matrix & convert to distance measure for calculating correlations. 
+sampleDists_40 <- as.dist(1 - sampleDists)
+sampleDistMatrix_40 <- as.matrix(sampleDists)
+cor.matrix_40 <-cor(sampleDistMatrix_40, method="pearson") # measure correlation 
+# plot sample correlation matrix
+pheatmap(cor.matrix_40, annotation_row = as.data.frame(colData(rlogdds_40))[ ,3:5], annotation_col = as.data.frame(colData(rlogdds_40))[ ,3:5], annotation_colors = hm_cols)
+```
+### plot PCA:
+```{r}
+  # by treatment
+PCA5 <- plotPCA(rlogdds_40, intgroup=c("Treatment"))+theme_classic()+ggtitle("fragCounts with rowSums >=40")
+  # by treatment & timepoint
+PCA6 <- plotPCA(rlogdds_40, intgroup=c("Treatment", "Timepoint"))+theme_classic()+scale_color_manual(values=TTcols)+ggtitle("fragCounts with rowSums >=40")
+  # plot only Palbo samples, by treatment, timepoint & biological replicate
+PCA7 <- plotPCA(rlogdds_40[ ,c(1:5, which(grepl("Palbo", colnames(rlogdds_40))))], intgroup=c("Treatment", "Timepoint", "Biorep"))+theme_classic()+scale_color_manual(values=Pcols)+ggtitle("fragCounts with rowSums >=40")
+  # plot only Doxo samples, by treatment, timepoint & biological replicate
+PCA8 <- plotPCA(rlogdds_40[ ,c(1:5, which(grepl("Doxo", colnames(rlogdds_40))))], intgroup=c("Treatment", "Timepoint", "Biorep"))+theme_classic()+scale_color_manual(values=Dcols)+ggtitle("fragCounts with rowSums >=40")
+```
+
+```{r}
+# plot PCA plots and sample correlation matrix together
+plot_grid(PCA6, PCA7, PCA8, PCA5, pheatmap(cor.matrix_40, annotation_row = as.data.frame(colData(rlogdds_40))[ ,3:5], annotation_col = as.data.frame(colData(rlogdds_40))[ ,3:5], annotation_colors = hm_cols)[[4]], axis="tblr", align="hv")
+```
+
+# determine if samples still cluster by treatment under different master peak set (created via iterative filtering using Ria's script)
+
+### count reads under peaks
+```{r}
+setwd("/lustre/fs4/risc_lab/scratch/jyeung/LS_PDvsDoxo_2/ATACseq/post_peakcalling_analysis/01182023_QC")
+iter_filt_masterpeaks <- import.gff2("iter_filt_nonredundant_masterpeaks_peakfilt.gtf", format="gtf")
+iter_filt_masterpeaks$name <- gsub("/peakCalls/.*", "", iter_filt_masterpeaks$name)
+
+# count fragments under peaks from reducedmasterpeaks
+setwd("/lustre/fs4/risc_lab/scratch/jyeung/LS_PDvsDoxo_2/ATACseq/ATACseq_pipeline")
+fragCounts_iter <- chromVAR::getCounts(paste0(samplenames,"/",bamDir), iter_filt_masterpeaks, paired=TRUE, by_rg=FALSE, format="bam")
+# convert fragCounts to numeric matrix of fragment counts under peaks
+fragCounts_iter <- SummarizedExperiment::assays(fragCounts_iter)[[1]] # convert fragment Counts into counts matrix
+# change column names to samplenames
+colnames(fragCounts_iter) <- samplenames
+# change row names to peak coordinates. 
+rownames(fragCounts_iter) <- iter_filt_masterpeaks$name
+```
+
+### make DESeq2 object
+```{r}
+dds_iter <- DESeq2::DESeqDataSetFromMatrix(countData=fragCounts_iter, design=~Condition, colData= metaData)
+# keep only peaks with a sum of > 30 read counts across rows. 
+keep <- rowSums(counts(dds_iter)) >= 30
+dds_iter <- dds_iter[keep,]
+# rlog normalize for QC metrics visualization
+rlogdds_iter <- rlog(dds_iter)
+```
+
+# plot pearson correlation coefficients & PCA across sample pairs for rlog normalized counts under peaks with rowSums >=30
+
+### plot pearson correlation coefficients on distance measures of rlog normalized counts across samples
+```{r}
+sampleDists_iter <- dist(t(assay(rlogdds_iter))) # get rlog normalized count matrix & convert to distance measure for calculating correlations. 
+sampleDists_iter <- as.dist(1 - sampleDists_iter)
+sampleDistMatrix_iter <- as.matrix(sampleDists_iter)
+cor.matrix_iter <-cor(sampleDistMatrix_iter, method="pearson") # measure correlation 
+pheatmap(cor.matrix_iter, annotation_row = as.data.frame(colData(rlogdds_iter))[ ,3:5], annotation_col = as.data.frame(colData(rlogdds_iter))[ ,3:5], annotation_colors = hm_cols) 
+```
+
+### plot PCA:
+```{r}
+  # by treatment
+PCA9 <- plotPCA(rlogdds_iter, intgroup=c("Treatment"))+theme_classic()+ggtitle("fragCounts_iter with rowSums >=30")
+  # by treatment & timepoint
+PCA10 <- plotPCA(rlogdds_iter, intgroup=c("Treatment", "Timepoint"))+theme_classic()+ggtitle("fragCounts_iter with rowSums >=30")+scale_color_manual(values=TTcols)
+  # plot only Palbo samples, by treatment, timepoint & biological replicate
+PCA11 <- plotPCA(rlogdds_iter[ ,c(1:5, which(grepl("Palbo", colnames(rlogdds_iter))))], intgroup=c("Treatment", "Timepoint", "Biorep"))+theme_classic()+ggtitle("fragCounts_iter with rowSums >=30")+scale_color_manual(values=Pcols)
+  # plot only Doxo samples, by treatment, timepoint & biological replicate
+PCA12 <- plotPCA(rlogdds_iter[ ,c(1:5, which(grepl("Doxo", colnames(rlogdds_iter))))], intgroup=c("Treatment", "Timepoint", "Biorep"))+theme_classic()+ggtitle("fragCounts_iter with rowSums >=30")+scale_color_manual(values=Dcols)
+```
+# plot PCA plots and sample correlation matrix together
+```{r}
+plot_grid(PCA10, PCA11, PCA12, PCA9, pheatmap(cor.matrix, annotation_row = as.data.frame(colData(rlogdds_iter))[ ,3:5], annotation_col = as.data.frame(colData(rlogdds_iter))[ ,3:5])[[4]], axis="tblr", align="hv", annotation_colors = hm_cols)
+```
+
+# determine if samples cluster better (and outliers are clustered properly with experiment condition) if correcting for batch effects using Combat. 
+
+## correct raw counts under non-redundant master peak set created via merging overlapping peaks using Combat-seq. 
+```{r}
+combatRawCounts <- ComBat_seq(
+  # raw count matrix filtered for peaks with rowSums >=40 reads 
+    fragCounts[rowSums(fragCounts) >= 40, ], 
+  # batch info, i.e. different experiments
+    batch = metaData$Biorep, 
+  # biological info, i.e. time points
+    group = metaData$Condition,
+  # full_mod = TRUE if you want to incorporate group conditons
+    full_mod = TRUE)
+# reformat ComBat_seq output into a RangedSummarizedExperiment object 
+combatCounts <- DESeqDataSetFromMatrix(combatRawCounts, colData = metaData, design=~Condition)
+rlogcombatCounts <- rlog(combatCounts)
+```
+### plot pearson correlation coefficients on distance measures of rlog normalized counts under peaks with rowSums >=40 & PCA across samples
+```{r}
+# look at combat corrected PCA plot
+PCA13 <- plotPCA(rlogcombatCounts, intgroup=c("Treatment", "Timepoint", "Biorep")) + theme_classic()+geom_point(size=0.5)+ggtitle("combat Corrected fragCounts with rowSums >=40")+scale_color_manual(values=c(Pcols, Dcols))
+
+sampleDists_combat <- dist(t(assay(rlogcombatCounts))) # get rlog normalized count matrix & convert to distance measure for calculating correlations. 
+sampleDists_combat <- as.dist(1 - sampleDists_combat)
+sampleDistMatrix_combat <- as.matrix(sampleDists_combat)
+cor.matrix_combat <-cor(sampleDistMatrix_combat, method="pearson") # measure correlation 
+pheatmap(cor.matrix_combat, annotation_row = as.data.frame(colData(rlogcombatCounts))[ ,3:5], annotation_col = as.data.frame(colData(rlogcombatCounts))[ ,3:5], annotation_colors = hm_cols) 
+```
+## correct raw counts under iteratively filtered master peak set using Combat-seq. 
+```{r}
+combatRawCounts_iter <- ComBat_seq(
+  # raw count matrix 
+    fragCounts_iter[rowSums(fragCounts_iter) >= 40, ], 
+  # batch info, i.e. different experiments
+    batch = metaData$Biorep, 
+  # biological info, i.e. time points
+    group = metaData$Condition,
+  # full_mod = TRUE if you want to incorporate group conditons
+    full_mod = TRUE)
+# reformat ComBat_seq output into a RangedSummarizedExperiment object 
+combatCounts_iter <- DESeqDataSetFromMatrix(combatRawCounts_iter, colData = metaData, design=~Condition)
+rlogcombatCounts_iter <- rlog(combatCounts_iter)
+```
+### plot pearson correlation coefficients on distance measures of rlog normalized counts under peaks with rowSums >=40 & PCA across samples
+```{r}
+# look at combat corrected PCA plot
+PCA14 <- plotPCA(rlogcombatCounts_iter, intgroup=c("Treatment", "Timepoint", "Biorep")) + theme_classic()+geom_point(size=0.5)+ggtitle("combat Corrected fragCounts_iter with rowSums >=40")+scale_color_manual(values=c(Pcols, Dcols))
+
+# look at combat corrected sample correlation matrix
+sampleDists_combat_iter <- dist(t(assay(rlogcombatCounts_iter))) # get rlog normalized count matrix & convert to distance measure for calculating correlations. 
+sampleDists_combat_iter <- as.dist(1 - sampleDists_combat_iter)
+sampleDistMatrix_combat_iter <- as.matrix(sampleDists_combat_iter)
+cor.matrix_combat_iter <-cor(sampleDistMatrix_combat_iter, method="pearson") # measure correlation 
+pheatmap(cor.matrix_combat_iter, annotation_row = as.data.frame(colData(rlogcombatCounts_iter))[ ,3:5], annotation_col = as.data.frame(colData(rlogcombatCounts_iter))[ ,3:5], annotation_colors = hm_cols)
+```
+### plot pearson correlation coefficients on distance measures of rlog normalized counts under peaks with rowSums >=20 & PCA across samples
+```{r}
+combatRawCounts_iter2 <- ComBat_seq(
+  # raw count matrix 
+    fragCounts_iter[rowSums(fragCounts_iter) >= 20, ], 
+  # batch info, i.e. different experiments
+    batch = metaData$Biorep, 
+  # biological info, i.e. time points
+    group = metaData$Condition,
+  # full_mod = TRUE if you want to incorporate group conditons
+    full_mod = TRUE)
+# reformat ComBat_seq output into a RangedSummarizedExperiment object 
+combatCounts_iter2 <- DESeqDataSetFromMatrix(combatRawCounts_iter2, colData = metaData, design=~Condition)
+rlogcombatCounts_iter2 <- rlog(combatCounts_iter2)
+
+# look at combat corrected PCA plot
+PCA15 <- plotPCA(rlogcombatCounts_iter2, intgroup=c("Treatment", "Timepoint", "Biorep")) + theme_classic()+geom_point(size=0.5)+ggtitle("combat Corrected fragCounts_iter with rowSums >=20")+scale_color_manual(values=c(Pcols, Dcols))
+
+# look at combat corrected sample correlation matrix
+sampleDists_combat_iter2 <- dist(t(assay(rlogcombatCounts_iter2))) # get rlog normalized count matrix & convert to distance measure for calculating correlations. 
+sampleDists_combat_iter2 <- as.dist(1 - sampleDists_combat_iter2)
+sampleDistMatrix_combat_iter2 <- as.matrix(sampleDists_combat_iter2)
+cor.matrix_combat_iter2 <-cor(sampleDistMatrix_combat_iter2, method="pearson") # measure correlation 
+pheatmap(cor.matrix_combat_iter2, annotation_row = as.data.frame(colData(rlogcombatCounts_iter2))[ ,3:5], annotation_col = as.data.frame(colData(rlogcombatCounts_iter2))[ ,3:5], annotation_colors = hm_cols) 
+```
+# plot PCA plots and sample correlation matrices together
+```{r}
+plot_grid(PCA13, PCA14, PCA15, pheatmap(cor.matrix_combat, annotation_row = as.data.frame(colData(rlogcombatCounts))[ ,3:5], annotation_col = as.data.frame(colData(rlogcombatCounts))[ ,3:5], annotation_colors = hm_cols)[[4]], pheatmap(cor.matrix_combat_iter, annotation_row = as.data.frame(colData(rlogcombatCounts_iter))[ ,3:5], annotation_col = as.data.frame(colData(rlogcombatCounts_iter))[ ,3:5], annotation_colors = hm_cols)[[4]], pheatmap(cor.matrix_combat_iter2, annotation_row = as.data.frame(colData(rlogcombatCounts_iter2))[ ,3:5], annotation_col = as.data.frame(colData(rlogcombatCounts_iter2))[ ,3:5], annotation_colors = hm_cols)[[4]])
+```
+
+# save all plots to pdf
+```{r, eval=F}
+setwd("/lustre/fs4/risc_lab/scratch/jyeung/LS_PDvsDoxo_2/ATACseq/post_peakcalling_analysis/01182023_QC")
+pdf("PCA_and_cor.matrix.pdf", width=30, height=15)
+
+plot_grid(PCA1, PCA2, PCA3, PCA4, pheatmap(cor.matrix, annotation_row = as.data.frame(colData(rlogdds))[ ,3:5], annotation_col = as.data.frame(colData(rlogdds))[ ,3:5])[[4]], )
+
+plot_grid(PCA6, PCA7, PCA8, PCA5, pheatmap(cor.matrix_40, annotation_row = as.data.frame(colData(rlogdds_40))[ ,3:5], annotation_col = as.data.frame(colData(rlogdds_40))[ ,3:5], annotation_colors = hm_cols)[[4]], axis="tblr", align="hv")
+
+plot_grid(PCA10, PCA11, PCA12, PCA9, pheatmap(cor.matrix, annotation_row = as.data.frame(colData(rlogdds_iter))[ ,3:5], annotation_col = as.data.frame(colData(rlogdds_iter))[ ,3:5], annotation_colors = hm_cols)[[4]], axis="tblr", align="hv")
+
+plot_grid(PCA13, PCA14, PCA15, pheatmap(cor.matrix_combat, annotation_row = as.data.frame(colData(rlogcombatCounts))[ ,3:5], annotation_col = as.data.frame(colData(rlogcombatCounts))[ ,3:5], annotation_colors = hm_cols)[[4]], pheatmap(cor.matrix_combat_iter, annotation_row = as.data.frame(colData(rlogcombatCounts_iter))[ ,3:5], annotation_col = as.data.frame(colData(rlogcombatCounts_iter))[ ,3:5], annotation_colors = hm_cols)[[4]], pheatmap(cor.matrix_combat_iter2, annotation_row = as.data.frame(colData(rlogcombatCounts_iter2))[ ,3:5], annotation_col = as.data.frame(colData(rlogcombatCounts_iter2))[ ,3:5], annotation_colors = hm_cols)[[4]])
+
+dev.off()
+```
+
+
+# pearson correlation on select experimental conditions
+```{r}
+corrmatrix <- function(rlogcounts){
+sampleDists <- dist(t(assay(rlogcounts))) # get rlog normalized count matrix & convert to distance measure for calculating correlations. 
+sampleDists <- as.dist(1 - sampleDists)
+sampleDistMatrix <- as.matrix(sampleDists)
+cor.matrix <-cor(sampleDistMatrix, method="pearson") 
+return(cor.matrix)
+}
+
+# day 14 Palbo & Doxo
+pheatmap(corrmatrix(rlogdds_40[ ,1:11]), annotation_row = as.data.frame(colData(rlogdds_40))[ ,3:5], annotation_col = as.data.frame(colData(rlogdds_40))[ ,3:5], annotation_colors = hm_cols)
+# day 3 Palbo & Doxo
+pheatmap(corrmatrix(rlogdds_40[ ,c(1:6, 28:38)]), annotation_row = as.data.frame(colData(rlogdds_40))[ ,3:5], annotation_col = as.data.frame(colData(rlogdds_40))[ ,3:5], annotation_colors = hm_cols)
+# day 21 Palbo & Doxo
+pheatmap(corrmatrix(rlogdds_40[ ,c(1:6, 12:21)]), annotation_row = as.data.frame(colData(rlogdds_40))[ ,3:5], annotation_col = as.data.frame(colData(rlogdds_40))[ ,3:5], annotation_colors = hm_cols)
+# day 3 & day 28 Palbo
+pheatmap(corrmatrix(rlogdds_40[ ,c(1:6, 22:27, 34:38)]), annotation_row = as.data.frame(colData(rlogdds_40))[ ,3:5], annotation_col = as.data.frame(colData(rlogdds_40))[ ,3:5], annotation_colors = hm_cols)
+```
+
+# scatterplot of rlog normalized counts
+```{r}
+# between samples that have a negative correlation coefficient for their distance measures of rlog normalized counts
+plot(assay(rlogdds)[, c(36,22)],  pch=20, cex=0.1)
+# between samples that have a positive correlation coefficient for their distance measures of rlog normalized counts
+plot(assay(rlogdds)[, c(36,35)],  pch=20, cex=0.1)
+```
+
