@@ -1,0 +1,1105 @@
+---
+title: "LS_PDvsDoxo_2_RNAseq_analysis_GOenrichment"
+author: "Joanna Yeung"
+date: "03/04/2023"
+output: html_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(message = FALSE)
+knitr::opts_chunk$set(cache =TRUE)
+```
+
+#### This script contains initial RNA-seq analysis of experiment code: LS_PDvsDoxo_1 where a comparison between 1uM Palbo & 100nM of Doxo treatment was done for the same timepoints in LS8817 cells. 
+
+### *WHAT WAS DONE*
+##### VERSION 107 OF ENSEMBL ID & VERSION P14 OF ENTREZ ID (LATEST VERSION) WAS DOWNLOADED: created genes_anno_type database matching ensembl, entrez & symbol ids of genes
+##### MSIGDB DATABASES DOWNLOADED
+##### GO ENRICHMENT ANALYSIS: 
+###### K-means clusters=3 & 4 with GO:BP database
+##### **Complete hierarchical clusters**
+
+#### load in workspace created from upstream steps done in "LS_PDvsDoxo_1_RNAseq_analysis_Kallisto_QC_DESeq2.Rmd". Objects created in this space depend on this workspace
+```{r}
+setwd("/lustre/fs4/risc_lab/scratch/jyeung/LS_PDvsDoxo_2/RNAseq/post_kallisto_analysis/workspaces")
+load("LS_PDvsDoxo_2_RNAseq_analysis_Kallisto_QC_DESeq2.RData")
+# load in msigdbr databases
+load("/lustre/fs4/risc_lab/scratch/jyeung/LS_PDvsDoxo_1/RNAseq/post_kallisto_analysis/workspaces/msigdbr_df_andt2g_workspace.RData")
+```
+
+#### load packages
+```{r}
+library(readr)
+library(GenomicFeatures)
+library(DESeq2)
+library(gridExtra)
+library(ggplot2)
+library(pheatmap)
+library(clusterProfiler)
+library(msigdbr)
+library(stringr)
+library(pheatmap)
+library(org.Hs.eg.db)
+library(ggrepel)
+library(ggupset)
+library(dplyr)
+library(readxl)
+library(VennDiagram)
+library(RColorBrewer)
+library(readxl)
+```
+
+#### universe (background gene set) for GO enrichment analysis is all genes expressed
+```{r}
+#universe <-AnnotationDbi::select(EnsDb.Hsapiens.v79, as.character(rlogMatrix_geneIDs$GENEID[!is.na(rlogMatrix_geneIDs$GENEID)]), "ENTREZID", "GENEID")
+universe <- genes_anno_type[match(gsub('\\.[0-9]*$', '', row.names(acrossGroups)), genes_anno_type$ensembl_id), ]
+```
+
+# GO enrichment analysis on k-means clusters from sigMat (significantly changing genes across all conditions, based on Likelihood ratio test)
+
+## *function to get GO enriched terms*:
+## arguments:
+### gene= vector of genes to test for GO enrichment (gene ensembl format)
+### universe=background gene set 
+### Database=database containing groups of genes to GO annotation term e.g. msigdb GO:BP
+```{r}
+getGOenrichment <-function(gene,universe,Database){
+  #gene_entrezID <-  AnnotationDbi::select(EnsDb.Hsapiens.v79, gene[!is.na(gene)], "ENTREZID", "SYMBOL") #convert gene IDs from SYMBOL format to ENTREZ ID format (was using v79, new code is using v107)
+  gene_entrezID <- genes_anno_type[match(gene, genes_anno_type$ensembl_id), ]
+  gene_go <- enricher(gene_entrezID$entrezid, TERM2GENE=Database, universe=universe) #enrichment analysis with hypergeometric test
+  gene_go <- setReadable(gene_go, OrgDb = org.Hs.eg.db, keyType="ENTREZID") #convert enrichment results from ENTREZ ID format to SYMBOL for easier interpretation
+return(gene_go)
+} 
+```
+
+# remake sigMat and clusters with ensembl_id as row names instead (this is my input gene id annotation style for GO enrichment analysis)
+```{r}
+sigMat <- assay(rlogcombatCountsall)[row.names(assay(rlogcombatCountsall)) %in% sigGenes, ]
+row.names(sigMat) <- gsub('\\.[0-9]*$', '', row.names(sigMat))
+# make heatmap of sig changing genes' rlog normalized counts
+rowScaledMat <- t(scale(t(sigMat)))
+dists <- t(dist(rowScaledMat)) # convert to dist object for hclust function to accept
+hc <- hclust(dists) # do complete hierarchical clustering on scaled rlog transformed read counts
+clusters <- cutree(hc, k=7)
+```
+
+# GO enrichment analysis on complete hierarchical clustering, clusters made from cutting tree =7 from sigMat (significantly changing genes across all conditions, based on Likelihood ratio test)
+```{r}
+sigMat <- assay(rlogcombatCountsall)[row.names(assay(rlogcombatCountsall)) %in% sigGenes, ]
+sigMat <- sigMat[ ,c(1,9,15,2,10,16,3,17,4,11,5,12,18,6,19,7,13,8,14)]
+row.names(sigMat) <- gsub('\\.[0-9]*$', '', row.names(sigMat))
+rowScaledMat <- t(scale(t(sigMat)))
+dists <- t(dist(rowScaledMat)) # convert to dist object for hclust function to accept
+hc <- hclust(dists) # do complete hierarchical clustering on scaled rlog transformed read counts
+clusters <- cutree(hc, k=7) # cut the tree to 7 clusters # order by matrix of sig genes' read counts by cluster
+```
+
+```{r}
+# GO enrichment analysis with msigdb GO:BP database:
+
+GOBP_enrichment_clusters <- list()
+dotplots_GOBP <- list()
+for(i in 1:length(unique(clusters))){
+ genes_in_clusters[[i]] <- names(clusters[clusters==i]) # get gene names for each cluster & save in list
+ names(genes_in_clusters)[i] <- paste("Cluster",i)
+ GOBP_enrichment_clusters[[i]] <- getGOenrichment(genes_in_clusters[[i]], as.character(universe$entrezid),msigdbr_t2g_GO_BP) # do GO enrichment analysis with background gene set set as all gene expressed, database used is msigdb GO:BP
+ dotplots_GOBP[[i]] <- clusterProfiler::dotplot(GOBP_enrichment_clusters[[i]], showCategory=10, font.size=6, title=paste("Cluster", i, "enriched GO:BP terms")) # make dotplot of top 50 most significantly enriched GO terms 
+}
+
+# GO enrichment analysis with msigdb KEGG database:
+GO_enrichment_clusters_KEGG <- list()
+dotplots_KEGG <- list()
+for(i in 1:length(unique(clusters))){
+GO_enrichment_clusters_KEGG[[i]] <- getGOenrichment(genes_in_clusters[[i]], as.character(universe$entrezid),msigdbr_t2g_KEGG)
+ dotplots_KEGG[[i]] <- clusterProfiler::dotplot(GO_enrichment_clusters_KEGG[[i]], showCategory=10, font.size=6, title=paste("Cluster", i, "enriched GO:KEGG terms"))
+}
+
+# GO enrichment analysis with msigdb Hallmark database:
+GO_enrichment_clusters_HallMark <- list()
+dotplots_HallMark <- list()
+for(i in 1:length(unique(clusters))){
+GO_enrichment_clusters_HallMark[[i]] <- getGOenrichment(genes_in_clusters[[i]], as.character(universe$entrezid),msigdbr_t2g_H)
+ names(GO_enrichment_clusters_HallMark)[i] <- paste("HallMark:Cluster",i) 
+ dotplots_HallMark[[i]] <- clusterProfiler::dotplot(GO_enrichment_clusters_HallMark[[i]], showCategory=10, font.size=6, title=paste("Cluster", i, "enriched GO:Hallmark terms"))
+}
+
+GO_enrichment_clusters_REACT <- list()
+dotplots_REACT <- list()
+for(i in 1:length(unique(clusters))){
+ GO_enrichment_clusters_REACT[[i]] <- getGOenrichment(genes_in_clusters[[i]], as.character(universe$entrezid),msigdbr_t2g_REACT)
+ names(GO_enrichment_clusters_REACT)[i] <- paste("REACT:Cluster",i) 
+ dotplots_REACT[[i]] <- clusterProfiler::dotplot(GO_enrichment_clusters_REACT[[i]], showCategory=10, font.size=6, title=paste("Cluster", i, "enriched GO:REACT terms"))
+}
+
+GO_enrichment_clusters_POSIT <- list()
+dotplots_POSIT <- list()
+for(i in  1:length(unique(clusters))){
+ GO_enrichment_clusters_POSIT[[i]] <- getGOenrichment(genes_in_clusters[[i]], as.character(universe$entrezid),msigdbr_t2g_POSIT)
+ names(GO_enrichment_clusters_POSIT)[i] <- paste("POSIT:Cluster",i) 
+ dotplots_POSIT[[i]] <- clusterProfiler::dotplot(GO_enrichment_clusters_POSIT[[i]], showCategory=10, font.size=6, title=paste("Cluster", i, "enriched GO:POSITIONAL terms"))
+}
+
+GO_enrichment_clusters_TFT <- list()
+dotplots_TFT <- list()
+for(i in 1:length(unique(clusters))){
+ GO_enrichment_clusters_TFT[[i]] <- getGOenrichment(genes_in_clusters[[i]], as.character(universe$entrezid),msigdbr_t2g_TFT)
+ names(GO_enrichment_clusters_TFT)[i] <- paste("TFT:Cluster",i) 
+ dotplots_TFT[[i]] <- clusterProfiler::dotplot(GO_enrichment_clusters_TFT[[i]], showCategory=50, font.size=6, title=paste("Cluster", i, "enriched GO:TFT terms"))
+}
+```
+
+```{r}
+pdf(file="/lustre/fs4/risc_lab/scratch/jyeung/LS_PDvsDoxo_2/RNAseq/post_kallisto_analysis/Figures/GO_enrichment_sigMat.pdf", width=20, height=8)
+grid.arrange(grobs=dotplots_GOBP)
+grid.arrange(grobs=dotplots_HallMark)
+grid.arrange(grobs=dotplots_KEGG)
+grid.arrange(grobs=dotplots_REACT)
+grid.arrange(grobs=dotplots_POSIT)
+grid.arrange(grobs=dotplots_TFT)
+dev.off()
+```
+
+```{r}
+sigGenesUp <- list()
+for(i in 1:length(LFCResultsall)){
+  sigGenesUp[[i]] <- row.names(LFCResultsall[[i]][row.names(LFCResultsall[[i]]) %in% row.names(sigGroups) & LFCResultsall[[i]]$log2FoldChange > 2, ])
+}
+sigGenesUp <- unique(unlist(sigGenesUp))
+sigGenesUp <-  gsub('\\.[0-9]*$', '', sigGenesUp)
+sigMat_sigGenesUp <- sigMat[row.names(sigMat) %in% sigGenesUp, ]
+row.names(sigMat_sigGenesUp) <- make.names(row.names(sigMat_sigGenesUp), unique=T)
+dists <- t(dist(t(scale(t(sigMat_sigGenesUp ))))) # convert to dist object for hclust function to accept
+hc <- hclust(dists) # do complete hierarchical clustering on scaled rlog transformed read counts
+clusters_sigGenesUp_4 <- cutree(hc, k=4) # cut the tree to 4 clusters
+
+
+GOBP_enrichment_clusters_sigGenesUp_4 <- list()
+dotplots_GOBP_sigGenesUp_4 <- list()
+for(i in 1:length(unique(clusters_sigGenesUp_4))){
+  genes_in_clusters <- list()
+ genes_in_clusters[[i]] <- names(clusters_sigGenesUp_4[clusters_sigGenesUp_4==i]) # get gene names for each cluster & save in list
+ names(genes_in_clusters)[i] <- paste("sig genes up, cutree=4,Cluster",i)
+ GOBP_enrichment_clusters_sigGenesUp_4[[i]] <- getGOenrichment(genes_in_clusters[[i]], as.character(universe$entrezid),msigdbr_t2g_GO_BP) # do GO enrichment analysis with background gene set set as all gene expressed, database used is msigdb GO:BP
+ dotplots_GOBP_sigGenesUp_4[[i]] <- clusterProfiler::dotplot(GOBP_enrichment_clusters_sigGenesUp_4[[i]], showCategory=10, font.size=6, title=paste("sig genes up, cutree=4,Cluster", i, "enriched GO:BP terms")) # make dotplot of top 50 most significantly enriched GO terms 
+}
+
+GOKEGG_enrichment_clusters_sigGenesUp_4 <- list()
+dotplots_GOKEGG_sigGenesUp_4 <- list()
+for(i in 1:length(unique(clusters_sigGenesUp_4))){
+  genes_in_clusters <- list()
+ genes_in_clusters[[i]] <- names(clusters_sigGenesUp_4[clusters_sigGenesUp_4==i]) # get gene names for each cluster & save in list
+ names(genes_in_clusters)[i] <- paste("sig genes up, cutree=4,Cluster",i)
+ GOKEGG_enrichment_clusters_sigGenesUp_4[[i]] <- getGOenrichment(genes_in_clusters[[i]], as.character(universe$entrezid),msigdbr_t2g_KEGG) # do GO enrichment analysis with background gene set set as all gene expressed, database used is msigdb GO:KEGG
+ dotplots_GOKEGG_sigGenesUp_4[[i]] <- clusterProfiler::dotplot(GOKEGG_enrichment_clusters_sigGenesUp_4[[i]], showCategory=10, font.size=6, title=paste("sig genes up, cutree=4,Cluster", i, "enriched GO:KEGG terms")) # make dotplot of top 50 most significantly enriched GO terms 
+}
+
+GOHallmark_enrichment_clusters_sigGenesUp_4 <- list()
+dotplots_GOHallmark_sigGenesUp_4 <- list()
+for(i in 1:length(unique(clusters_sigGenesUp_4))){
+  genes_in_clusters <- list()
+ genes_in_clusters[[i]] <- names(clusters_sigGenesUp_4[clusters_sigGenesUp_4==i]) # get gene names for each cluster & save in list
+ names(genes_in_clusters)[i] <- paste("sig genes up, cutree=4,Cluster",i)
+ GOHallmark_enrichment_clusters_sigGenesUp_4[[i]] <- getGOenrichment(genes_in_clusters[[i]], as.character(universe$entrezid),msigdbr_t2g_H) # do GO enrichment analysis with background gene set set as all gene expressed, database used is msigdb GO:Hallmark
+ dotplots_GOHallmark_sigGenesUp_4[[i]] <- clusterProfiler::dotplot(GOHallmark_enrichment_clusters_sigGenesUp_4[[i]], showCategory=10, font.size=6, title=paste("sig genes up, cutree=4,Cluster", i, "enriched GO:Hallmark terms")) # make dotplot of top 50 most significantly enriched GO terms 
+}
+
+GOREACT_enrichment_clusters_sigGenesUp_4 <- list()
+dotplots_GOREACT_sigGenesUp_4 <- list()
+for(i in 1:length(unique(clusters_sigGenesUp_4))){
+  genes_in_clusters <- list()
+ genes_in_clusters[[i]] <- names(clusters_sigGenesUp_4[clusters_sigGenesUp_4==i]) # get gene names for each cluster & save in list
+ names(genes_in_clusters)[i] <- paste("sig genes up, cutree=4,Cluster",i)
+ GOREACT_enrichment_clusters_sigGenesUp_4[[i]] <- getGOenrichment(genes_in_clusters[[i]], as.character(universe$entrezid),msigdbr_t2g_REACT) # do GO enrichment analysis with background gene set set as all gene expressed, database used is msigdb GO:REACT
+ dotplots_GOREACT_sigGenesUp_4[[i]] <- clusterProfiler::dotplot(GOREACT_enrichment_clusters_sigGenesUp_4[[i]], showCategory=10, font.size=6, title=paste("sig genes up, cutree=4,Cluster", i, "enriched GO:REACT terms")) # make dotplot of top 50 most significantly enriched GO terms 
+}
+
+GOPOSIT_enrichment_clusters_sigGenesUp_4 <- list()
+dotplots_GOPOSIT_sigGenesUp_4 <- list()
+for(i in 1:length(unique(clusters_sigGenesUp_4))){
+  genes_in_clusters <- list()
+ genes_in_clusters[[i]] <- names(clusters_sigGenesUp_4[clusters_sigGenesUp_4==i]) # get gene names for each cluster & save in list
+ names(genes_in_clusters)[i] <- paste("sig genes up, cutree=4,Cluster",i)
+ GOPOSIT_enrichment_clusters_sigGenesUp_4[[i]] <- getGOenrichment(genes_in_clusters[[i]], as.character(universe$entrezid),msigdbr_t2g_POSIT) # do GO enrichment analysis with background gene set set as all gene expressed, database used is msigdb GO:REACT
+ dotplots_GOPOSIT_sigGenesUp_4[[i]] <- clusterProfiler::dotplot(GOPOSIT_enrichment_clusters_sigGenesUp_4[[i]], showCategory=10, font.size=6, title=paste("sig genes up, cutree=4,Cluster", i, "enriched GO:REACT terms")) # make dotplot of top 50 most significantly enriched GO terms 
+}
+
+GOTFT_enrichment_clusters_sigGenesUp_4 <- list()
+dotplots_GOTFT_sigGenesUp_4 <- list()
+for(i in 1:length(unique(clusters_sigGenesUp_4))){
+  genes_in_clusters <- list()
+ genes_in_clusters[[i]] <- names(clusters_sigGenesUp_4[clusters_sigGenesUp_4==i]) # get gene names for each cluster & save in list
+ names(genes_in_clusters)[i] <- paste("sig genes up, cutree=4,Cluster",i)
+ GOTFT_enrichment_clusters_sigGenesUp_4[[i]] <- getGOenrichment(genes_in_clusters[[i]], as.character(universe$entrezid),msigdbr_t2g_POSIT) # do GO enrichment analysis with background gene set set as all gene expressed, database used is msigdb GO:REACT
+ dotplots_GOTFT_sigGenesUp_4[[i]] <- clusterProfiler::dotplot(GOTFT_enrichment_clusters_sigGenesUp_4[[i]], showCategory=10, font.size=6, title=paste("sig genes up, cutree=4,Cluster", i, "enriched GO:REACT terms")) # make dotplot of top 50 most significantly enriched GO terms 
+}
+```
+
+```{r}
+pdf(file="/lustre/fs4/risc_lab/scratch/jyeung/LS_PDvsDoxo_2/RNAseq/post_kallisto_analysis/Figures/GO_enrichment_sigMat_sigGenesUp_4.pdf", width=20, height=8)
+grid.arrange(grobs=dotplots_GOBP_sigGenesUp_4)
+grid.arrange(grobs=dotplots_GOHallmark_sigGenesUp_4)
+grid.arrange(grobs=dotplots_GOKEGG_sigGenesUp_4)
+grid.arrange(grobs=dotplots_GOREACT_sigGenesUp_4)
+grid.arrange(grobs=dotplots_GOPOSIT_sigGenesUp_4)
+grid.arrange(grobs=dotplots_GOTFT_sigGenesUp_4)
+dev.off()
+```
+
+```{r}
+sigGenesDown <- list()
+for(i in 1:length(LFCResultsall)){
+  sigGenesDown[[i]] <- row.names(LFCResultsall[[i]][row.names(LFCResultsall[[i]]) %in% row.names(sigGroups) & LFCResultsall[[i]]$log2FoldChange < -2, ])
+}
+sigGenesDown <- unique(unlist(sigGenesDown))
+sigGenesDown <-  gsub('\\.[0-9]*$', '', sigGenesDown)
+
+sigMat_sigGenesDown <- sigMat[row.names(sigMat) %in% sigGenesDown, ]
+row.names(sigMat_sigGenesDown) <- make.names(row.names(sigMat_sigGenesDown), unique=T)
+dists <- t(dist(t(scale(t(sigMat_sigGenesDown ))))) # convert to dist object for hclust function to accept
+hc <- hclust(dists) # do complete hierarchical clustering on scaled rlog transformed read counts
+clusters_sigGenesDown_4 <- cutree(hc, k=4) 
+
+GOBP_enrichment_clusters_sigGenesDown_4 <- list()
+dotplots_GOBP_sigGenesDown_4 <- list()
+for(i in 1:length(unique(clusters_sigGenesDown_4))){
+genes_in_clusters <- list()
+genes_in_clusters[[i]] <- names(clusters_sigGenesDown_4[clusters_sigGenesDown_4==i]) # get gene names for each cluster & save in list
+ names(genes_in_clusters)[i] <- paste("sig genes down, cutree=5,Cluster",i)
+ GOBP_enrichment_clusters_sigGenesDown_4[[i]] <- getGOenrichment(genes_in_clusters[[i]], as.character(universe$entrezid),msigdbr_t2g_GO_BP) # do GO enrichment analysis with background gene set set as all gene expressed, database used is msigdb GO:BP
+ dotplots_GOBP_sigGenesDown_4[[i]] <- clusterProfiler::dotplot(GOBP_enrichment_clusters_sigGenesDown_4[[i]], showCategory=10, font.size=6, title=paste("sig genes down, cutree=5,Cluster", i, "enriched GO:BP terms")) # make dotplot of top 50 most significantly enriched GO terms 
+}
+
+GOKEGG_enrichment_clusters_sigGenesDown_4 <- list()
+dotplots_GOKEGG_sigGenesDown_4 <- list()
+for(i in 1:length(unique(clusters_sigGenesDown_4))){
+  genes_in_clusters <- list()
+ genes_in_clusters[[i]] <- names(clusters_sigGenesDown_4[clusters_sigGenesDown_4==i]) # get gene names for each cluster & save in list
+ names(genes_in_clusters)[i] <- paste("sig genes down, cutree=5,Cluster",i)
+ GOKEGG_enrichment_clusters_sigGenesDown_4[[i]] <- getGOenrichment(genes_in_clusters[[i]], as.character(universe$entrezid),msigdbr_t2g_KEGG) # do GO enrichment analysis with background gene set set as all gene expressed, database used is msigdb GO:KEGG
+ dotplots_GOKEGG_sigGenesDown_4[[i]] <- clusterProfiler::dotplot(GOKEGG_enrichment_clusters_sigGenesDown_4[[i]], showCategory=10, font.size=6, title=paste("sig genes down, cutree=5,Cluster", i, "enriched GO:KEGG terms")) # make dotplot of top 50 most significantly enriched GO terms 
+}
+
+GOHallmark_enrichment_clusters_sigGenesDown_4 <- list()
+dotplots_GOHallmark_sigGenesDown_4 <- list()
+for(i in 1:length(unique(clusters_sigGenesDown_4))){
+  genes_in_clusters <- list()
+ genes_in_clusters[[i]] <- names(clusters_sigGenesDown_4[clusters_sigGenesDown_4==i]) # get gene names for each cluster & save in list
+ names(genes_in_clusters)[i] <- paste("sig genes down, cutree=5,Cluster",i)
+ GOHallmark_enrichment_clusters_sigGenesDown_4[[i]] <- getGOenrichment(genes_in_clusters[[i]], as.character(universe$entrezid),msigdbr_t2g_H) # do GO enrichment analysis with background gene set set as all gene expressed, database used is msigdb GO:Hallmark
+ dotplots_GOHallmark_sigGenesDown_4[[i]] <- clusterProfiler::dotplot(GOHallmark_enrichment_clusters_sigGenesDown_4[[i]], showCategory=10, font.size=6, title=paste("sig genes down, cutree=5,Cluster", i, "enriched GO:Hallmark terms")) # make dotplot of top 50 most significantly enriched GO terms 
+}
+
+GOREACT_enrichment_clusters_sigGenesDown_4 <- list()
+dotplots_GOREACT_sigGenesDown_4 <- list()
+for(i in 1:length(unique(clusters_sigGenesDown_4))){
+  genes_in_clusters <- list()
+ genes_in_clusters[[i]] <- names(clusters_sigGenesDown_4[clusters_sigGenesDown_4==i]) # get gene names for each cluster & save in list
+ names(genes_in_clusters)[i] <- paste("sig genes down, cutree=5,Cluster",i)
+ GOREACT_enrichment_clusters_sigGenesDown_4[[i]] <- getGOenrichment(genes_in_clusters[[i]], as.character(universe$entrezid),msigdbr_t2g_REACT) # do GO enrichment analysis with background gene set set as all gene expressed, database used is msigdb GO:REACT
+ dotplots_GOREACT_sigGenesDown_4[[i]] <- clusterProfiler::dotplot(GOREACT_enrichment_clusters_sigGenesDown_4[[i]], showCategory=10, font.size=6, title=paste("sig genes down, cutree=5,Cluster", i, "enriched GO:REACT terms")) # make dotplot of top 50 most significantly enriched GO terms 
+}
+
+GOPOSIT_enrichment_clusters_sigGenesDown_4 <- list()
+dotplots_GOPOSIT_sigGenesDown_4 <- list()
+for(i in 1:length(unique(clusters_sigGenesDown_4))){
+  genes_in_clusters <- list()
+ genes_in_clusters[[i]] <- names(clusters_sigGenesDown_4[clusters_sigGenesDown_4==i]) # get gene names for each cluster & save in list
+ names(genes_in_clusters)[i] <- paste("sig genes up, cutree=4,Cluster",i)
+ GOPOSIT_enrichment_clusters_sigGenesDown_4[[i]] <- getGOenrichment(genes_in_clusters[[i]], as.character(universe$entrezid),msigdbr_t2g_POSIT) # do GO enrichment analysis with background gene set set as all gene expressed, database used is msigdb GO:REACT
+ dotplots_GOPOSIT_sigGenesDown_4[[i]] <- clusterProfiler::dotplot(GOPOSIT_enrichment_clusters_sigGenesDown_4[[i]], showCategory=10, font.size=6, title=paste("sig genes up, cutree=4,Cluster", i, "enriched GO:REACT terms")) # make dotplot of top 50 most significantly enriched GO terms 
+}
+
+GOTFT_enrichment_clusters_sigGenesDown_4 <- list()
+dotplots_GOTFT_sigGenesDown_4 <- list()
+for(i in 1:length(unique(clusters_sigGenesDown_4))){
+  genes_in_clusters <- list()
+ genes_in_clusters[[i]] <- names(clusters_sigGenesDown_4[clusters_sigGenesDown_4==i]) # get gene names for each cluster & save in list
+ names(genes_in_clusters)[i] <- paste("sig genes up, cutree=4,Cluster",i)
+ GOTFT_enrichment_clusters_sigGenesDown_4[[i]] <- getGOenrichment(genes_in_clusters[[i]], as.character(universe$entrezid),msigdbr_t2g_POSIT) # do GO enrichment analysis with background gene set set as all gene expressed, database used is msigdb GO:REACT
+ dotplots_GOTFT_sigGenesDown_4[[i]] <- clusterProfiler::dotplot(GOTFT_enrichment_clusters_sigGenesDown_4[[i]], showCategory=10, font.size=6, title=paste("sig genes up, cutree=4,Cluster", i, "enriched GO:REACT terms")) # make dotplot of top 50 most significantly enriched GO terms 
+}
+```
+
+```{r}
+pdf(file="/lustre/fs4/risc_lab/scratch/jyeung/LS_PDvsDoxo_2/RNAseq/post_kallisto_analysis/Figures/GO_enrichment_sigMat_sigGenesDown_4.pdf", width=20, height=8)
+grid.arrange(grobs=dotplots_GOBP_sigGenesDown_4)
+grid.arrange(grobs=dotplots_GOHallmark_sigGenesDown_4)
+grid.arrange(grobs=dotplots_GOKEGG_sigGenesDown_4)
+grid.arrange(grobs=dotplots_GOREACT_sigGenesDown_4)
+grid.arrange(grobs=dotplots_GOPOSIT_sigGenesDown_4)
+grid.arrange(grobs=dotplots_GOTFT_sigGenesDown_4)
+dev.off()
+```
+
+```{r}
+clusters_commonPgenes <- list(
+cutree6_1=clusters_commonPgenes_6[clusters_commonPgenes_6 == 1],  cutree6_3=clusters_commonPgenes_6[clusters_commonPgenes_6 == 3], cutree6_5=clusters_commonPgenes_6[clusters_commonPgenes_6 == 5], cutree6_1=clusters_commonPgenes_6[clusters_commonPgenes_6 == 6], cutree15_6=clusters_commonPgenes_15[clusters_commonPgenes_15 == 6])
+for(i in 1:length(clusters_commonPgenes)){
+    clusters_commonPgenes[[i]] <- ifelse(names(clusters_commonPgenes[[i]]) %in% genes_anno_type$gene_id, genes_anno_type[match(names(clusters_commonPgenes[[i]]), genes_anno_type$gene_id), ]$ensembl_id, names(clusters_commonPgenes[[i]]))
+}
+
+GO_enrichment_clusters_REACT_commonPgenes <- list()
+dotplots_REACT_commonPgenes <- list()
+for(i in 1:length(clusters_commonPgenes)){
+ GO_enrichment_clusters_REACT_commonPgenes[[i]] <- getGOenrichment(clusters_commonPgenes[[i]], as.character(universe$entrezid),msigdbr_t2g_REACT)
+ names(GO_enrichment_clusters_REACT_commonPgenes)[i] <- paste(names(clusters_commonPgenes)[i]) 
+ dotplots_REACT_commonPgenes[[i]] <- clusterProfiler::dotplot(GO_enrichment_clusters_REACT_commonPgenes[[i]], showCategory=50, font.size=6, title=paste(names(clusters_commonPgenes)[i], "enriched GO:REACT_commonPgenes terms"))
+}
+
+GO_enrichment_clusters_Hallmark_commonPgenes <- list()
+dotplots_Hallmark_commonPgenes <- list()
+for(i in 1:length(clusters_commonPgenes)){
+ GO_enrichment_clusters_Hallmark_commonPgenes[[i]] <- getGOenrichment(clusters_commonPgenes[[i]], as.character(universe$entrezid),msigdbr_t2g_H)
+ names(GO_enrichment_clusters_Hallmark_commonPgenes)[i] <- paste(names(clusters_commonPgenes)[i]) 
+ dotplots_Hallmark_commonPgenes[[i]] <- clusterProfiler::dotplot(GO_enrichment_clusters_Hallmark_commonPgenes[[i]], showCategory=50, font.size=6, title=paste(names(clusters_commonPgenes)[i],"enriched GO:Hallmark_commonPgenes terms"))
+}
+```
+
+
+# plot MA plots based on clusters to see where the gene clusters lie on the MA plots (LFC based on Wald Test, but clustering based on Likelihood Ratio Test).    
+
+##*function*: to assign which genes belong to which genes belong to which k-means clusters from DESeq results object. To be used later input for plotting
+```{r}
+AssignCluster <- function(DESeqResult){
+  ifelse(gsub(".*\\|", "", row.names(DESeqResult)) %in% names(nbclust$Best.partition[nbclust$Best.partition==1]), "Cluster 1",  ifelse(gsub(".*\\|", "", row.names(DESeqResult)) %in% names(nbclust$Best.partition[nbclust$Best.partition==2]), "Cluster 2", ifelse(gsub(".*\\|", "", row.names(DESeqResult)) %in% names(nbclust$Best.partition[nbclust$Best.partition==3]), "Cluster 3", "Not Significant")))
+}
+```
+
+# make new row called "Cluster" for facet_wrap with ggplot
+```{r}
+DoxovsCycLFC$Cluster <- AssignCluster(DoxovsCycLFC)   
+PalbovsCycLFC$Cluster <- AssignCluster(PalbovsCycLFC) 
+PalbovsDoxoLFC$Cluster <- AssignCluster(PalbovsDoxoLFC) 
+
+#plot MA plots based on clusters to see where the gene clusters lie on the MA plot.         
+MAplot_DoxovsCyc_3 <- ggplotMA(DoxovsCycLFC, NULL, "DoxovsCyc (LFC)")+facet_wrap(~Cluster)
+MAplot_PalbovsCyc_3 <- ggplotMA(PalbovsCycLFC, NULL, "PalbovsCyc (LFC)")+facet_wrap(~Cluster)
+MAplot_PalbovsDoxo_3 <- ggplotMA(PalbovsDoxoLFC, NULL, "PalbovsDoxo (LFC)")+facet_wrap(~Cluster)
+
+grid.arrange(MAplot_DoxovsCyc_3, MAplot_PalbovsCyc_3, MAplot_PalbovsDoxo_3)
+```
+
+
+
+
+
+
+
+
+
+
+
+### looking at differences across conditions in specific enriched GO terms--> heatmap of rlog transformed gene counts for genes belonging to enriched GO term
+
+#### high in Palbo cluster, via k-means clustering=3
+```{r}
+GO_enrichment_clusters[[1]]$ID[6:7]
+
+# rlog normalized read count matrix of genes belonging to "RTRANSMEMBRANE RECEPTOR PROTEIN SERINE THREONINE KINASE SIGNALING PATHWAY" term
+a <- sigMat_2[row.names(sigMat_2) %in% genes_anno_type[genes_anno_type$gene_id %in% unlist(strsplit(GO_enrichment_clusters[[1]]$geneID[7], "/")), "ensembl_id"], ] # make list of genes belong to GO enrichment term (output of enricher function in ClusterProfiler package) into a vector & filter for rlog transformed read counts of those genes.
+pheatmap(a, scale = "row", show_rownames = T, cluster_rows=F) # generate heatmap of rlog transformed read counts
+
+# rlog normalized read count matrix of genes belonging to "RESPONSE TO TRANSFORMING GROWTH FACTOR BETA" term
+a <- sigMat_2[row.names(sigMat_2) %in% genes_anno_type[genes_anno_type$gene_id %in% unlist(strsplit(GO_enrichment_clusters[[1]]$geneID[6], "/")), "ensembl_id"], ]
+pheatmap(a, scale = "row", show_rownames = T, cluster_rows=F)
+```
+
+#### high in Doxo cluster, via k-means clustering=3
+```{r}
+GO_enrichment_clusters[[2]]$ID[c(38, 41)]
+
+# rlog normalized read count matrix of genes belonging to "REGULATION OF APOPTOTIC SIGNALING PATHWAY" term
+a <- sigMat_2[row.names(sigMat_2) %in% genes_anno_type[genes_anno_type$gene_id %in% unlist(strsplit(GO_enrichment_clusters[[2]]$geneID[38], "/")), "ensembl_id"], ]
+pheatmap(a, scale = "row", show_rownames = T, cluster_rows=F)
+
+# rlog normalized read count matrix of genes belonging to "POSITIVE REGULATION OF AUTOPHAGY" term
+a <- sigMat_2[row.names(sigMat_2) %in% genes_anno_type[genes_anno_type$gene_id %in% unlist(strsplit(GO_enrichment_clusters[[2]]$geneID[41], "/")),"ensembl_id"], ]
+pheatmap(a, scale = "row", show_rownames = T, cluster_rows=F)
+```
+
+
+#### Venn diagram of shared vs unique enriched GO terms from on clusters created by complete hierarchical clustering, clusters made from cutting tree =7 from sigMat (significantly changing genes across all conditions, based on Likelihood ratio test)
+```{r}
+# make list of GO:BP enrichment terms for each hierarchical cluster 
+Venn4_list <- list()
+for(i in 1:7){Venn4_list[[i]] <- GO_enrichment_clusters_2[[i]]$ID}
+
+#Venn diagram of shared vs unique GO:BP terms between Cluster 1 (High in Palbo) & 4 (High in Doxo)
+Venn4 <- venn.diagram(x=list(Venn4_list[[1]], Venn4_list[[4]]),category.names=paste("Cluster", c(1,4)),  
+filename=NULL, 
+fill=c("#B9A9FC", "#96CC32"), 
+    height = 200 , 
+        width = 200,
+lwd = 2,lty = 'blank',
+cex = 2,
+fontface = "bold",fontfamily = "sans",
+cat.cex = 1, cat.fontface = "bold",cat.default.pos = "outer",cat.fontfamily = "sans", 
+main="shared enriched GO:BP terms", main.fontface="bold", main.fontfamily="sans")
+
+#Venn diagram of shared vs unique GO:BP terms between Cluster 3 & 7 (Both high in Cyc)
+Venn5 <- venn.diagram(x=list(Venn4_list[[3]], Venn4_list[[7]]),category.names=paste("Cluster", c(3,7)),  
+filename=NULL, 
+fill=c("#E188EE", "#D2B32A"), 
+    height = 200 , 
+        width = 200,
+lwd = 2,lty = 'blank',
+cex = 2,
+fontface = "bold",fontfamily = "sans",
+cat.cex = 1, cat.fontface = "bold",cat.default.pos = "outer",cat.fontfamily = "sans", 
+main="shared enriched GO:BP terms", main.fontface="bold", main.fontfamily="sans")
+grid.draw(Venn4) # plot Venn4 
+grid.draw(Venn5)
+
+#Venn diagram of shared vs unique GO:BP terms between Cluster 2 (high in Cyc & Doxo) & 5 (High in Doxo & Palbo)
+Venn5.5 <- venn.diagram(x=list(Venn4_list[[2]], Venn4_list[[5]]),category.names=paste("Cluster", c(2,5)),
+filename=NULL, 
+fill=c("#E3958A", "#7FD1FD"), 
+    height = 200 , 
+        width = 200,
+lwd = 2,lty = 'blank',
+cex = 2,
+fontface = "bold",fontfamily = "sans",
+cat.cex = 1, cat.fontface = "bold",cat.default.pos = "outer",cat.fontfamily = "sans", 
+main="shared enriched GO:BP terms", main.fontface="bold", main.fontfamily="sans")
+grid.draw(Venn5.5)
+
+#Venn diagram of shared vs unique KEGG terms between Cluster 1,6 (high in Palbo) & 4 (High in Doxo)
+Venn6 <- venn.diagram(x=list(GO_enrichment_clusters_KEGG[[1]]$ID, GO_enrichment_clusters_KEGG[[6]]$ID, GO_enrichment_clusters_KEGG[[4]]$ID),category.names=paste("Cluster", c(1,6,4)),  
+filename=NULL, 
+fill=c("#B9A9FC", "#84D9B1", "#96CC32"), 
+    height = 200 , 
+        width = 200,
+lwd = 2,lty = 'blank',
+cex = 2,
+fontface = "bold",fontfamily = "sans",
+cat.cex = 1, cat.fontface = "bold",cat.default.pos = "outer",cat.fontfamily = "sans", 
+main="shared enriched KEGG terms", main.fontface="bold", main.fontfamily="sans")
+grid.draw(Venn6)
+
+#Venn diagram of shared vs unique KEGG terms between Cluster 2 (High in Cyc & Doxo),4 (high in Doxo) & 5 (High in Doxo & Palbo)
+Venn7 <- venn.diagram(x=list(GO_enrichment_clusters_KEGG[[2]]$ID, GO_enrichment_clusters_KEGG[[4]]$ID, GO_enrichment_clusters_KEGG[[5]]$ID),category.names=paste("Cluster", c(2,4,5)),  
+filename=NULL, 
+fill=c("#E3958A", "#96CC32", "#7FD1FD"), 
+    height = 200 , 
+        width = 200,
+lwd = 2,lty = 'blank',
+cex = 2,
+fontface = "bold",fontfamily = "sans",
+cat.cex = 1, cat.fontface = "bold",cat.default.pos = "outer",cat.fontfamily = "sans", 
+main="shared enriched KEGG terms", main.fontface="bold", main.fontfamily="sans")
+grid.draw(Venn7)
+
+#Venn diagram of shared vs unique Hallmark terms between Cluster 1,6 (high in Palbo) & 4 (High in Doxo)
+Venn8 <- venn.diagram(x=list(GO_enrichment_clusters_HallMark[[1]]$ID, GO_enrichment_clusters_HallMark[[4]]$ID),category.names=paste("Cluster", c(1,4)),  
+filename=NULL, 
+fill=c("#B9A9FC","#96CC32"), 
+    height = 200 , 
+        width = 200,
+lwd = 2,lty = 'blank',
+cex = 2,
+fontface = "bold",fontfamily = "sans",
+cat.cex = 2, cat.fontface = "bold",cat.default.pos = "outer",cat.fontfamily = "sans", 
+main="shared enriched Hallmark terms", main.fontface="bold", main.fontfamily="sans")
+grid.draw(Venn8)
+
+#Venn diagram of shared vs unique Hallmark terms between Cluster 2 (High in Cyc & Doxo),4 (high in Doxo) & 5 (High in Doxo & Palbo)
+Venn9 <- venn.diagram(x=list(GO_enrichment_clusters_HallMark[[2]]$ID, GO_enrichment_clusters_HallMark[[4]]$ID, GO_enrichment_clusters_HallMark[[5]]$ID),category.names=paste("Cluster", c(2,4,5)),  
+filename=NULL, 
+fill=c("#E3958A", "#96CC32", "#7FD1FD"), 
+    height = 200 , 
+        width = 200,
+lwd = 2,lty = 'blank',
+cex = 2,
+fontface = "bold",fontfamily = "sans",
+cat.cex = 1, cat.fontface = "bold",cat.default.pos = "outer",cat.fontfamily = "sans", 
+main="shared enriched Hallmark terms", main.fontface="bold", main.fontfamily="sans")
+grid.draw(Venn9)
+```
+
+# 9-14-2022: analyze genes that belong to p53 pathway and TNFA signalling via NFKB GO Terms.
+
+### Different Clusters end up having the same GO Terms but from different sets of genes. Hence, what other pathways do these genes play a role in? 
+#### Focusing on Cluster 5 (High in Doxo, Med in Palbo genes) & 6 (high in Palbo, med in Doxo genes) since these clusters indicate a shared cell cycle arrest signature response between Doxo & Palbo. Cluster 4 is Doxo specific signature.  
+
+```{r}
+# get genes from Cluster 4 and Cluster 5 (from complete hierarchical clustering) that belong to p53 GO Term (from doing GO enrichment on msigdbr HallMark database)
+P53_PATHWAY_GENES <- list(
+unlist(str_split(GO_enrichment_clusters_HallMark[[4]][GO_enrichment_clusters_HallMark[[4]]$ID %in% "P53 PATHWAY"]$geneID, pattern="/")),#convert Cluster 4's enrichResult's geneID results into list (right now genes are all 1 object in a vector, separated by "/")
+
+unlist(str_split(GO_enrichment_clusters_HallMark[[5]][GO_enrichment_clusters_HallMark[[5]]$ID %in% "P53 PATHWAY"]$geneID, pattern="/"))) # do the same as above for Cluster 5
+names(P53_PATHWAY_GENES) <- c("Cluster 4", "Cluster 5")
+
+# get genes from Cluster 4 and Cluster 5 (from complete hierarchical clustering) that belong to p53 GO Term (from doing GO enrichment on msigdbr HallMark database)
+TNFA_SIGNALING_VIA_NFKB <- list(
+unlist(str_split(GO_enrichment_clusters_HallMark[[4]][GO_enrichment_clusters_HallMark[[4]]$ID %in% "TNFA SIGNALING VIA NFKB"]$geneID, pattern="/")), unlist(str_split(GO_enrichment_clusters_HallMark[[5]][GO_enrichment_clusters_HallMark[[5]]$ID %in% "TNFA SIGNALING VIA NFKB"]$geneID, pattern="/")), 
+unlist(str_split(GO_enrichment_clusters_HallMark[[6]][GO_enrichment_clusters_HallMark[[6]]$ID %in% "TNFA SIGNALING VIA NFKB"]$geneID, pattern="/"))
+)
+names(TNFA_SIGNALING_VIA_NFKB) <- c("Cluster 4", "Cluster 5", "Cluster 6")
+
+getGOenrichment(genes_anno_type[genes_anno_type$gene_id %in% c(TNFA_SIGNALING_VIA_NFKB$`Cluster 5`, P53_PATHWAY_GENES$`Cluster 5`), "ensembl_id"], universe$entrezid, msigdbr_t2g_REACT)
+```
+
+## *function to get convert enrichResult's genes under GO term into Tibble with columns indicating Hallmark GO term (Pathway) to gene* :
+## arguments:
+### enricherResult= enrichResult object , where GO enrichment was done using clusterProfiler package
+```{r}
+PATHWAY2GENE <- function(enrichResult){
+
+enrichResult_as_Tibble <- enrichResult %>% as_tibble() %>% mutate(geneID=strsplit(enrichResult$geneID, "/")) # convert geneIDs into individual objects (right now they are 1 object separated by "/")
+
+pathwaylist <- list()
+for(i in 1:length(enrichResult_as_Tibble$ID)){
+ pathwaylist[[i]] <- rep(enrichResult_as_Tibble$ID[i], enrichResult_as_Tibble$Count[i]) # repeat Pathway ID as many times as the number of genes belong to the pathway (as indicated by Count column from enrichResult object)--> this matches the pathway to the genes corresponding to it. 
+} 
+pathwaylist <- unlist(pathwaylist) 
+PATHWAY2GENE <- tibble(PATHWAY=pathwaylist, geneID=unlist(enrichResult_as_Tibble$geneID)) # generate tibble from the pathwaylist (PATHWAY) & enrichResult_as_Tibble (geneID) objects  
+return(PATHWAY2GENE)
+}
+```
+
+## do GO enrichment on genes under p53 pathway GO Term to see what other pathways they may belong to. 
+```{r}
+P53_PATHWAY_GENES_GO_H <- getGOenrichment(genes_anno_type[match(unlist(P53_PATHWAY_GENES), genes_anno_type$gene_id), "ensembl_id"], universe$entrezid, msigdbr_t2g_H) # do GO enrichment with previous user defined function, getGOenrichment using msigdbr Hallmark database. 
+
+# convert GO enrichment results to tibble 
+P53_PATHWAY2GENE <- PATHWAY2GENE(P53_PATHWAY_GENES_GO_H)
+
+# add information about which hierarchical cluster genes came from into PATHWAY2GENE tibble
+P53_PATHWAY2GENE$CLUSTER <- ifelse(P53_PATHWAY2GENE$geneID %in% P53_PATHWAY_GENES$`Cluster 4`, "Cluster 4", "Cluster 5") # if geneID is found in Cluster 4, print "Cluster 4", else print "Cluster 5"
+
+P53_PATHWAY <- genes_anno_type[match(unlist(P53_PATHWAY_GENES), genes_anno_type$gene_id), ] # get ensembl id of gene IDs of p53 pathway genes from genes_anno_type object
+
+P53_PATHWAY_GENES_sigMat <- sigMat[row.names(sigMat) %in% P53_PATHWAY$ensembl_id, ] # extract gene counts of P53 pathway genes by matching ensembl ids with row names from sigMat
+
+# order P53_PATHWAY_GENES_sigMat based on how genes are organized by hierarchical clustering
+set.seed(153)
+hc_P53 <- hclust(t(dist(t(scale(t(P53_PATHWAY_GENES_sigMat)))))) # perform hierarchical clustering on matrix of gene counts
+
+P53_PATHWAY_GENES_sigMat <- P53_PATHWAY_GENES_sigMat[hc_P53$order, ] # order matrix based on hierarchical clustering order
+
+row.names(P53_PATHWAY_GENES_sigMat) <- genes_anno_type[match(row.names(P53_PATHWAY_GENES_sigMat), genes_anno_type$ensembl_id), "gene_id"] # convert rownames from ensembl id to gene symbol format of P53_PATHWAY_GENES_sigMat
+
+# order P53_PATHWAY2GENE tibble by hierarchical clustering results
+P53_PATHWAY2GENE2 <- P53_PATHWAY2GENE %>%
+  group_by(geneID) %>% # group results by gene ID, meaning that each gene is a row, and the pathway(s) that belong to the genes will be stored as a list. 
+  summarize(Pathways = list(PATHWAY), Cluster=CLUSTER) %>%
+  arrange(match(geneID, row.names(P53_PATHWAY_GENES_sigMat))) # rearrange rows based on order of P53_PATHWAY_GENES_sigMat
+
+# make geneID column as factor so that when upset plot is created, the order of genes is based on hierarchical clustering results
+P53_PATHWAY2GENE2$geneID <- factor(P53_PATHWAY2GENE2$geneID, levels=row.names(P53_PATHWAY_GENES_sigMat))
+
+# make upset plot showing number of genes belonging to each intersection category of pathways, using bar plot. Filter tibble by genes that belong to Cluster 5 only. 
+P53_PATHWAY2GENE2 %>% filter(Cluster =="Cluster 5") %>%
+  ggplot(aes(x = Pathways, y=geneID)) +
+  geom_point(aes(fill=Cluster), size=2, colour="black", pch=21)+
+  scale_fill_manual(values=brewer.pal(8, "Spectral")[8])+
+    scale_x_upset(order_by = "degree")
+
+# make upset plot showing number of genes belonging to each intersection category of pathways, using bar plot, filtered by genes that only belong to Cluster 5
+P53_PATHWAY2GENE2 %>% filter(Cluster =="Cluster 5") %>%
+  ggplot(aes(x = Pathways)) +
+  geom_bar()+
+    scale_x_upset(order_by = "degree")
+```
+
+## do GO enrichment on genes under TNFA via NFKB signalling pathway GO Term to see what other pathways they may belong to. 
+```{r}
+TNFA_SIGNALING_VIA_NFKB_GO_H <- getGOenrichment(genes_anno_type[match(unlist(TNFA_SIGNALING_VIA_NFKB), genes_anno_type$gene_id), "ensembl_id"], universe$entrezid, msigdbr_t2g_H) # do GO enrichment with previous user defined function, getGOenrichment using msigdbr Hallmark database. 
+
+TNFA_SIGNALING_VIA_NFKB_GENES <- genes_anno_type[match(unlist(TNFA_SIGNALING_VIA_NFKB), genes_anno_type$gene_id), ] # get ensembl id of gene IDs of TNFA via NFKB signalling pathway genes from genes_anno_type object
+
+TNFA_NFKB_GENES_sigMat <- sigMat[row.names(sigMat) %in% TNFA_SIGNALING_VIA_NFKB_GENES$ensembl_id, ] # extract gene counts of TNFA via NFKB signalling pathway genes by matching ensembl ids with row names from sigMat
+
+# convert GO enrichment results to tibble
+TNFA_NFKB_PATHWAY2GENE <- PATHWAY2GENE(TNFA_SIGNALING_VIA_NFKB_GO_H)
+
+# add information about which hierarchical cluster genes came from into PATHWAY2GENE tibble
+TNFA_NFKB_PATHWAY2GENE$CLUSTER <- ifelse(TNFA_NFKB_PATHWAY2GENE$geneID %in% TNFA_SIGNALING_VIA_NFKB[[1]], "Cluster 4", ifelse(TNFA_NFKB_PATHWAY2GENE$geneID %in% TNFA_SIGNALING_VIA_NFKB[[2]], "Cluster 5", "Cluster 6")) # if geneID is found in Cluster 4, print "Cluster 4", else if geneID is found in CLuster 5, print "Cluster 5", else print "Cluster 6"
+
+# order TNFA_NFKB_GENES_sigMat based on how genes are organized by hierarchical clustering
+
+# convert to dist object for hclust function to accept
+set.seed(153)
+hc_TNFA_NFKB <- hclust(t(dist(t(scale(t(TNFA_NFKB_GENES_sigMat))))))  # perform hierarchical clustering on matrix of gene counts
+
+TNFA_NFKB_GENES_sigMat <- TNFA_NFKB_GENES_sigMat[hc_TNFA_NFKB$order, ] # order matrix based on hierarchical clustering order
+
+row.names(TNFA_NFKB_GENES_sigMat) <- genes_anno_type[match(row.names(TNFA_NFKB_GENES_sigMat), genes_anno_type$ensembl_id), "gene_id"] # convert rownames from ensembl id to gene symbol format of TNFA_NFKB_GENES_sigMat
+
+
+#TNFA_NFKB_PATHWAY2GENE <- TNFA_NFKB_PATHWAY2GENE[!TNFA_NFKB_PATHWAY2GENE$PATHWAY %in% "TNFA SIGNALING VIA NFKB", ]
+
+# order P53_PATHWAY2GENE tibble by hierarchical clustering results
+TNFA_NFKB_PATHWAY2GENE2 <- TNFA_NFKB_PATHWAY2GENE %>%
+  group_by(geneID) %>%  # group results by gene ID, meaning that each gene is a row, and the pathway(s) that belong to the genes will be stored as a list.
+  summarize(Pathways = list(PATHWAY), Cluster=CLUSTER) %>%
+  arrange(match(geneID, row.names(TNFA_NFKB_GENES_sigMat)))  # rearrange rows based on order of TNFA_NFKB_GENES_sigMat
+
+TNFA_NFKB_PATHWAY2GENE2$geneID <- factor(TNFA_NFKB_PATHWAY2GENE2$geneID, levels=row.names(TNFA_NFKB_GENES_sigMat)) # make geneID column as factor so that when upset plot is created, the order of genes is based on hierarchical clustering results
+
+# make upset plot showing number of genes belonging to each intersection category of pathways, using geom_jitter plot. Filter tibble by genes that belong to Clusters 5 & 6 only. 
+  TNFA_NFKB_PATHWAY2GENE2 %>% filter(!(Cluster %in% "Cluster 4")) %>%
+  ggplot(aes(x = Pathways, y=Cluster))+
+  geom_jitter(aes(fill=Cluster), size=1, color="black", pch=21)+
+  scale_fill_manual(values=brewer.pal(8, "Spectral")[c(8,3)])+
+    scale_x_upset(order_by = "degree", intersections = unique(TNFA_NFKB_PATHWAY2GENE2$Pathways)[-5])+
+axis_combmatrix(sep = "-", levels = c("TNFA SIGNALING VIA NFKB", "INFLAMMATORY RESPONSE", "INTERFERON GAMMA RESPONSE", "IL6 JAK STAT3 SIGNALING", "IL2 STAT5 SIGNALING" , "COMPLEMENT",  "KRAS SIGNALING UP", "UV RESPONSE UP", "P53 PATHWAY", "APOPTOSIS", "HYPOXIA", "EPITHELIAL MESENCHYMAL TRANSITION",  "TGF BETA SIGNALING")) + # reordering how Pathways appear on x axis
+  theme_combmatrix(combmatrix.panel.point.size = 1, combmatrix.panel.line.size = 0.5) 
+
+# make upset plot showing number of genes belonging to each intersection category of pathways, using geom_jitter plot. Filter tibble by genes that belong to Cluster 6 only. 
+ TNFA_NFKB_PATHWAY2GENE2 %>% filter(!(Cluster %in% c("Cluster 4", "Cluster 5"))) %>%
+  ggplot(aes(x = Pathways, y=Cluster))+
+  geom_jitter(aes(fill=Cluster), size=1, color="black", pch=21)+
+  scale_fill_manual(values=brewer.pal(8, "Spectral")[3])+
+    scale_x_upset(order_by = "degree", intersections = unique(TNFA_NFKB_PATHWAY2GENE2$Pathways)[-5])+
+   axis_combmatrix(sep = "-", levels = c("TNFA SIGNALING VIA NFKB", "INFLAMMATORY RESPONSE", "INTERFERON GAMMA RESPONSE", "IL6 JAK STAT3 SIGNALING", "IL2 STAT5 SIGNALING" , "COMPLEMENT",  "KRAS SIGNALING UP", "UV RESPONSE UP", "P53 PATHWAY", "APOPTOSIS", "HYPOXIA", "EPITHELIAL MESENCHYMAL TRANSITION",  "TGF BETA SIGNALING"))+
+   theme_combmatrix(combmatrix.panel.point.size = 1, combmatrix.panel.line.size = 0.5)
+ 
+# make upset plot showing number of genes belonging to each intersection category of pathways, using geom_jitter plot. Filter tibble by genes that belong to Cluster 5 only 
+  TNFA_NFKB_PATHWAY2GENE2 %>% filter(!(Cluster %in% c("Cluster 4","Cluster 6"))) %>%
+  ggplot(aes(x = Pathways, y=Cluster))+
+  geom_jitter(aes(fill=Cluster), size=1, color="black", pch=21)+
+  scale_fill_manual(values=brewer.pal(8, "Spectral")[c(8,3)])+
+    scale_x_upset(order_by = "degree", intersections = unique(TNFA_NFKB_PATHWAY2GENE2$Pathways)[-5])+
+axis_combmatrix(sep = "-", levels = c("TNFA SIGNALING VIA NFKB", "INFLAMMATORY RESPONSE", "INTERFERON GAMMA RESPONSE", "IL6 JAK STAT3 SIGNALING", "IL2 STAT5 SIGNALING" , "COMPLEMENT",  "KRAS SIGNALING UP", "UV RESPONSE UP", "P53 PATHWAY", "APOPTOSIS", "HYPOXIA", "EPITHELIAL MESENCHYMAL TRANSITION",  "TGF BETA SIGNALING")) + # reordering how Pathways appear on x axis
+  theme_combmatrix(combmatrix.panel.point.size = 1, combmatrix.panel.line.size = 0.5) 
+
+```
+
+## function: PATHWAY2GENE_matrix
+### arguments: 
+### PATHWAY2GENE: output of PATHWAY2GENE function (to convert enrichResult's genes under GO term into Tibble with columns indicating Hallmark GO term (Pathway) to gene)
+### enricherResult= enrichResult object , where GO enrichment was done using clusterProfiler package
+```{r}
+PATHWAY2GENE_matrix <- function(PATHWAY2GENE, enrichResult){
+
+PATHWAY2GENE_Matrix <- matrix(ncol=length(unique(PATHWAY2GENE$PATHWAY)) , # number of columns = number of unique pathway terms found by GO enrichment
+                                          nrow=length(unique(PATHWAY2GENE$geneID)), # number of rows = number of unique genes from GO enrichment results
+                                          dimnames=list(unique(PATHWAY2GENE$geneID), # row names = gene IDs
+                                                        unique(PATHWAY2GENE$PATHWAY))) # column names = pathway IDs 
+
+# create a list object where each object consists of the genes found under each pathway--> number of objects in this list is = to the number of columns in matrix made above. 
+genes_in_PATHWAY <- strsplit(enrichResult$geneID, "/")
+names(genes_in_PATHWAY) <- enrichResult$ID
+
+# populate the binary matrix with 1 (yes) & 2 (no) values: 
+# for ith column, if row names of matrix (contains gene IDs) is also found in ith object in genes_in_TNFA_NFKB list, then add 1 (for yes), else (it is not found in the ith object in genes_in_TNFA_NFKB list) add 2 (for no)
+for(i in 1:ncol(PATHWAY2GENE_Matrix)){
+ PATHWAY2GENE_Matrix[ ,i]<- ifelse(row.names(PATHWAY2GENE_Matrix) %in% genes_in_PATHWAY[[i]], 1, 2) # 1 for yes, 2 for no
+}
+
+# transform matrix so that gene IDs are columns and pathways are row names
+PATHWAY2GENE_Matrix <- t(PATHWAY2GENE_Matrix)
+return(PATHWAY2GENE_Matrix)
+} 
+```
+# 9-22-2022: After meeting with Viviana, I am going to focus on filtering genes not by GO terms, but by the actual experiment (by hierarchical cluster)- because GO terms are biased based on whatever cell type they come from. 
+
+### focus on Cluster 5 because its a shared signature between both Doxo and Palbo 
+#### perform hierarchical clustering on cluster 5 genes under TNFA via NFKB signalling belonging to each combination of pathways. Output as binary matrix of Yes & No values, yes as in gene does belong to combination of pathways & No as gene does not belong to combination of pathways
+```{r}
+# filter PATHWAY2GENE tibble for only Cluster 5 genes
+TNFA_NFKB_PATHWAY2GENE_5 <- TNFA_NFKB_PATHWAY2GENE %>% filter(CLUSTER == "Cluster 5")
+
+# make binary matrix to do hierarchical clustering on pathway terms and genes- where 1 = gene belongs to Pathway, and 2 = gene does not belong to pathway
+TNFA_NFKB_PATHWAY2GENE_5_Matrix <- PATHWAY2GENE_matrix(TNFA_NFKB_PATHWAY2GENE_5, TNFA_SIGNALING_VIA_NFKB_GO_H)
+
+set.seed(153)
+pheatmap(TNFA_NFKB_PATHWAY2GENE_5_Matrix, cluster_cols = T, cluster_rows=T) # heatmap of binary matrix to check out how it looks 
+
+# do complete hierarchical clustering to order genes based on similarity with the types of pathways they belong to 
+set.seed(153)
+TNFA_NFKB_5_hc <- hclust(t(dist(t(TNFA_NFKB_PATHWAY2GENE_5_Matrix)))) # perform hierarchical clustering on binary matrix of yes or no values of genes in pathways
+
+TNFA_NFKB_PATHWAY2GENE_5_Matrix_ordered <- TNFA_NFKB_PATHWAY2GENE_5_Matrix[hclust(t(dist(TNFA_NFKB_PATHWAY2GENE_5_Matrix)))$order ,TNFA_NFKB_5_hc$order] # order binary matrix by order of hierarchical clustering
+
+pheatmap(TNFA_NFKB_PATHWAY2GENE_5_Matrix_ordered, cluster_cols = T, cluster_rows=F) # visualize via heatmap
+```
+## function: UpsetPlotInput
+## arguments: 
+### binary_matrix: matrix where column names are geneIDs and row names are pathways found in enrichResult GO enrichment analysis. values of matrix are 1 (for yes, gene is found to belong to pathway) or 2 (for no, gene is not found to belong to pathway).
+#### note: after UpsetPlotInput object is made, you should make Pathways and/or geneIDs as factors to order them how you want on ggplot. 
+```{r}
+# creating upset plot based on binary matrix (same as what ggupset package gives you, however ggupset is not very tailorable to needs of user so I am creating my own code)
+UpsetPlotInput <- function(binary_matrix){
+pathway2genelist <- list()
+for(i in 1:ncol(binary_matrix)){
+ pathway2genelist[[i]] <- binary_matrix[ ,i] # each ith object in list is just values 1 or 2 of pathways under each ith column (gene IDs) from matrix
+ pathway2genelist[[i]] <- names(which(pathway2genelist[[i]]==1)) # keep only pathway IDs which have a value of 1, means that gene belongs to this pathway but not the others. 
+}
+
+# label each object in list by gene IDs (columns of binary matrix)
+names(pathway2genelist) <- colnames(binary_matrix)
+
+# create another list object that only contains unique intersections of pathways combinations. since multiple genes may have the same category of intersections of pathways combinations 
+pathwayintersections <- unique(pathway2genelist)
+
+names(pathwayintersections) <- paste0("cat", 1:length(pathwayintersections)) # label each category of pathways intersection by cat followed by a number. 
+
+# generate data frame to match each gene to the category of pathways intersection that they belong to
+temp <- data.frame(geneID=names(pathway2genelist), cat=paste0("cat", match(pathway2genelist, pathwayintersections)))
+temp$cat <- factor(temp$cat, levels=paste0("cat", 1:length(pathwayintersections)))  # make category of pathways intersection as factor so order doesn't get messed up when its plotted. 
+
+df <- t(binary_matrix) %>% as.data.frame # transform binary matrix back into gene IDs as rows and Pathway IDs as columns and then into dataframe. 
+
+# create another dataframe where you match gene IDs to whether they belong to pathway or not (indicated by YesorNo column)
+df2 <- data.frame(
+  Pathways=rep(colnames(df), nrow(df)), # repeat column names (Pathway IDs)by the number of rows in df (49 times)
+  
+  geneID= unlist(lapply(row.names(df), rep, ncol(df))), # repeat each gene ID by number of pathways (13)
+  
+  YesorNo=unlist(lapply(t(df), print))) # print Yes or No values (value of rows of df)
+
+df2 <- merge(df2, temp, by="geneID") # temp dataframe contained info on category of intersection of pathways to genes. Add that information to df2
+return(df2)
+}
+```
+
+## *function*: plotUpsetPlot
+## arguments: 
+### UpsetPlotInput: output of previous function, "UpsetPlotInput
+```{r}
+plotUpsetPlot <- function(UpsetPlotInput){g1 <- ggplot(data=UpsetPlotInput, aes(x = cat, y = Pathways)) +
+  geom_rect(ymin=0, ymax=14, xmin=0, xmax=49, fill="white")+ # generate rectangle the size dictated by number of pathways and genes
+          geom_point(aes(color=as.factor(YesorNo)), size=2, show.legend = F)+ # colour points based on YesorNo values of Pathways
+          geom_line(data=UpsetPlotInput[UpsetPlotInput$YesorNo ==1, ], aes(group=geneID))+ # connect only points with Yes value (1) 
+          scale_color_manual(values= c("black","light grey")) + # black =1 while light grey =2 for YesorNo values
+        theme(axis.text.x=element_blank(), #remove x axis labels
+        axis.ticks.x=element_blank())+ # remove axis labels & ticks
+  xlab("")
+
+## 2nd: plot number of genes belonging to each pathway of intersections (shares same x axis as g1, which is cat column in UpsetPlotInput)
+g2 <- ggplot(data=UpsetPlotInput[!duplicated(UpsetPlotInput$geneID), ], aes(x=cat, y=Cluster))+ # data is unique geneIDs in UpsetPlotInput, so we can plot the accurate number of gene IDs to category of pathway intersections
+geom_jitter(aes(fill=Cluster),size=2, color="black", pch=21, show.legend=F)+
+scale_fill_brewer(palette = "Spectral")+
+theme(axis.text.x=element_blank(), #remove x axis labels
+        )+
+  xlab("")
+
+# use cowplot package to align the 2 plots, g1 & g2 (which share same x axis) on top of one another to form upset plot. 
+library(cowplot)
+return(cowplot::plot_grid(g2,g1,
+                   ncol = 1,
+                   labels = "auto",
+                   align = "v")
+)
+}
+```
+#### plot number of cluster 5 & 6 genes under TNFA via NFKB signalling belonging to each combination of pathways, ordered by hierarchical clustering
+```{r}
+TNFA_NFKB_5_Upset <- UpsetPlotInput(TNFA_NFKB_PATHWAY2GENE_5_Matrix_ordered)
+TNFA_NFKB_5_Upset$Pathways <- factor(TNFA_NFKB_5_Upset$Pathways, levels=rev(row.names(TNFA_NFKB_PATHWAY2GENE_5_Matrix_ordered))) # make pathways as factor based on hierarchical clustering of Pathways
+
+TNFA_NFKB_5_Upset$Cluster <- "Cluster 5" # TNFA_NFKB_5_Upset genes are all from Cluster 5 so make column specifying as such
+
+# plot upset plot:
+plotUpsetPlot(TNFA_NFKB_5_Upset)
+```
+#### perform hierarchical clustering on cluster 5 & 6  genes under TNFA via NFKB signalling belonging to each combination of pathways. Output as binary matrix of Yes & No values, yes as in gene does belong to combination of pathways & No as gene does not belong to combination of pathways
+```{r}
+# filter PATHWAY2GENE tibble for Cluster 5 & 6 genes
+TNFA_NFKB_PATHWAY2GENE_5and6 <- TNFA_NFKB_PATHWAY2GENE %>% filter(CLUSTER == c("Cluster 5", "Cluster 6"))
+
+# make binary matrix to do hierarchical clustering on pathway terms and genes- where 1 = gene belongs to Pathway, and 2 = gene does not belong to pathway
+TNFA_NFKB_PATHWAY2GENE_5and6_Matrix <- PATHWAY2GENE_matrix(TNFA_NFKB_PATHWAY2GENE_5and6, TNFA_SIGNALING_VIA_NFKB_GO_H) 
+
+set.seed(153)
+pheatmap(TNFA_NFKB_PATHWAY2GENE_5and6_Matrix, cluster_cols = T, cluster_rows=T) # heatmap of binary matrix to check out how it looks 
+
+# do complete hierarchical clustering to order genes based on similarity with the types of pathways they belong to 
+TNFA_NFKB_5and6_hc <- hclust(t(dist(t(TNFA_NFKB_PATHWAY2GENE_5and6_Matrix)))) # perform hierarchical clustering on binary matrix of yes or no values of genes in pathways
+
+set.seed(153)
+TNFA_NFKB_PATHWAY2GENE_5and6_Matrix_ordered <- TNFA_NFKB_PATHWAY2GENE_5and6_Matrix[hclust(t(dist(TNFA_NFKB_PATHWAY2GENE_5and6_Matrix)))$order ,TNFA_NFKB_5and6_hc$order] # order binary matrix by order of hierarchical clustering
+
+anno <- data.frame(Cluster=TNFA_NFKB_PATHWAY2GENE[!duplicated(TNFA_NFKB_PATHWAY2GENE$geneID), ]$CLUSTER, row.names=TNFA_NFKB_PATHWAY2GENE[!duplicated(TNFA_NFKB_PATHWAY2GENE$geneID), ]$geneID)
+
+#TNFA_NFKB_PATHWAY2GENE_5and6_Matrix <- TNFA_NFKB_PATHWAY2GENE_5and6_Matrix[hclust(t(dist(TNFA_NFKB_PATHWAY2GENE_5and6_Matrix)))$order, ]
+
+pheatmap(TNFA_NFKB_PATHWAY2GENE_5and6_Matrix, color=c("#4575B4","#D73027"), cluster_cols = T, cluster_rows=T, annotation=anno) # visualize via heatmap
+
+pheatmap(TNFA_NFKB_PATHWAY2GENE_5and6_Matrix_ordered, color=c("#4575B4","#D73027"), cluster_cols = F, cluster_rows=F, annotation=anno) # visualize via heatmap
+```
+
+#### plot number of cluster 5 & 6 genes under TNFA via NFKB signalling belonging to each combination of pathways, ordered by hierarchical clustering
+```{r}
+TNFA_NFKB_5and6_Upset <- UpsetPlotInput(TNFA_NFKB_PATHWAY2GENE_5and6_Matrix_ordered)
+TNFA_NFKB_5and6_Upset$Pathways <- factor(TNFA_NFKB_5and6_Upset$Pathways, levels=rev(row.names(TNFA_NFKB_PATHWAY2GENE_5and6_Matrix_ordered))) # make pathways as factor based on hierarchical clustering of Pathways
+
+TNFA_NFKB_5and6_Upset$Cluster <- ifelse(TNFA_NFKB_5and6_Upset$geneID %in% TNFA_SIGNALING_VIA_NFKB$`Cluster 5`, "Cluster 5", "Cluster 6") #  make column specifying which cluster genes came from
+
+
+# plot upset plot:
+plotUpsetPlot(TNFA_NFKB_5and6_Upset)
+```
+##### do GO enrichment on genes shared under p53 pathway & TNFA via NFKB signalling GO Terms to see what other pathways they may belong to. 
+##### *note: did not follow up on this after getting feedback about making decisions based on the experiment, and not the GO terms*
+```{r, eval=F}
+SHARED_P53_NFKB_GENES_GO_H <- getGOenrichment(SHARED_P53_NFKB_GENES$ensembl_id, universe$entrezid, msigdbr_t2g_H) # do GO enrichment with previous user defined function, getGOenrichment using msigdbr Hallmark database. 
+
+# convert GO enrichment results to tibble 
+SHARED_P53_NFKB_PATHWAY2GENE <- PATHWAY2GENE(SHARED_P53_NFKB_GENES_GO_H)
+
+# make upset plot showing which genes belonging to each intersection category of pathways using ggupset package
+library(ggupset)
+SHARED_P53_NFKB_PATHWAY2GENE %>%
+  group_by(geneID) %>%
+  summarize(Pathways = list(PATHWAY)) %>%
+  ggplot(aes(x = Pathways, y=geneID)) +
+  geom_point(aes(y=geneID), size=2)+
+  scale_color_manual(values=brewer.pal(8, "Spectral")[c(1,8)])+
+    scale_x_upset(order_by = "degree")
+
+# make upset plot showing number of genes belonging to each intersection category of pathways, using bar plot. 
+SHARED_P53_NFKB_PATHWAY2GENE %>%
+  group_by(geneID) %>%
+  summarize(Pathways = list(PATHWAY)) %>%
+  ggplot(aes(x = Pathways)) +
+  geom_bar()+
+    scale_x_upset(order_by = "degree")
+```
+
+# 9:25-2022: look at further subclustering the 7 main hierarchical clusters from sigMat (sig changing genes across conditions) by cutting tree into 10. 
+```{r}
+tot_cluster_4 <- cutree(hc, k=10) # cut the tree to 10 clusters
+ordered_sigMat <- cbind(ordered_sigMat, clusters_cutree10=tot_cluster_4[match(row.names(ordered_sigMat), names(tot_cluster_4))]) # add another column that includes cluster gene belongs to
+annotation <- data.frame(ordered_sigMat[, c(7,8)], row.names=row.names(ordered_sigMat))  # make dataframe for annotation clusters on heatmap
+annotation$cluster <- as.factor(annotation$cluster) # convert to factor for better pheatmap display for original 7 clusters
+annotation$clusters_cutree10 <- as.factor(annotation$clusters_cutree10) # convert to factor for better pheatmap display for new cutree=10 subclusters
+
+# specify colors you want annotation_colors argument in pheatmap function to be Set2 palette for annotation$cluster & Spectral palette for annotation$clusters_cutree10
+mycolors <- list(cluster = brewer.pal(7, "Set2"),clusters_cutree10=brewer.pal(10, "Spectral"))
+names(mycolors$clusters_cutree10) <- levels(annotation$clusters_cutree10)
+names(mycolors$cluster) <- levels(annotation$cluster)
+pheatmap(ordered_sigMat[,-c(7,8)], scale="row", show_rownames = F, cluster_rows = T, annotation_row=annotation, annotation_colors = mycolors) # generate heatmap showing clusters generated by cutting tree to 10 clusters vs original 7 clusters. 
+```
+#### redo GO enrichment on each of the 10 subclusters of sigMat with Hallmark & GO:MF Databases
+```{r}
+# GO enrichment using Hallmark database: 
+cutree10_clusters_HallMark <- list()
+cutree10_dotplots_HallMark <- list()
+cutree10_genes <- list(length=10)
+for(i in 1:10){
+  cutree10_genes[[i]] <- names(tot_cluster_4[tot_cluster_4==i]) # get gene names for each cluster & save in list
+ names(cutree10_genes)[i] <- paste("Cutree=10", "Cluster", i)
+ 
+ cutree10_clusters_HallMark[[i]] <- getGOenrichment(cutree10_genes[[i]], as.character(universe$entrezid),msigdbr_t2g_H)
+ names(cutree10_clusters_HallMark)[i] <- paste("HallMark:Cluster",i) 
+ 
+ cutree10_dotplots_HallMark[[i]] <- dotplot(cutree10_clusters_HallMark[[i]], showCategory=50, font.size=6, title=paste("Cluster", i, "enriched GO terms"))
+}
+# checking out 5 & 9 subclusters because they are shared between Palbo & Cyc conditions
+grid.arrange(grobs= cutree10_dotplots_HallMark[c(5,9)])
+
+# GO enrichment using GO:MF database
+cutree10_clusters_MF <- list()
+cutree10_dotplots_MF <- list()
+for(i in 1:10){
+ cutree10_clusters_MF[[i]] <- getGOenrichment(cutree10_genes[[i]], as.character(universe$entrezid),msigdbr_t2g_GO_MF)
+ names(cutree10_clusters_MF)[i] <- paste("MF:Cluster",i) 
+ 
+ cutree10_dotplots_MF[[i]] <- dotplot(cutree10_clusters_MF[[i]], showCategory=50, font.size=6, title=paste("Cluster", i, "enriched GO terms"))
+}
+# checking out 5 & 9 subclusters because they are shared between Palbo & Cyc conditions
+grid.arrange(grobs= cutree10_dotplots_MF[c(5,9)])
+```
+#### look at what pathways are shared within genes of a subcluster:
+##### upset plot of enriched Hallmark terms in subcluster 5
+```{r}
+cutree10_H_PATHWAY2GENE <- lapply(cutree10_clusters_HallMark, PATHWAY2GENE) # convert results of enriched Hallmark terms into Tibble with columns indicating Hallmark GO term (Pathway) to gene
+cutree10_MF_PATHWAY2GENE <- lapply(cutree10_clusters_MF[c(1:6,8)], PATHWAY2GENE) # convert results of enriched GO:MF terms into Tibble with columns indicating GO:MF term (Pathway) to gene
+
+cutree10_H_MF <- list(PATHWAY2GENE(cutree10_clusters_MF[[5]]), PATHWAY2GENE(cutree10_clusters_HallMark[[5]])) # combine results from Hallmark & GO:MF enrichment from subcluster 5 into list(high in Palbo, med in Cyc)
+
+# create binary matrix showing subcluster 5 genes & which Hallmark pathways they belong to
+cutree10_H_matrix <- PATHWAY2GENE_matrix(cutree10_H_MF[[2]], cutree10_clusters_HallMark[[5]])
+
+cutree10_H_matrix <- cutree10_H_matrix[ , hclust(dist(t(scale(cutree10_H_matrix))))$order] # order genes via hierarchical clustering of binary matrix
+
+cutree10_H_upset <- UpsetPlotInput(cutree10_H_matrix)
+cutree10_H_upset$Cluster <- "5"
+plotUpsetPlot(cutree10_H_upset)
+```
+##### upset plot of enriched GO:MF terms in subcluster 5
+```{r}
+cutree10_MF_matrix <- PATHWAY2GENE_matrix(cutree10_H_MF[[1]], cutree10_clusters_MF[[5]])
+
+cutree10_MF_matrix <- cutree10_MF_matrix[ , hclust(dist(t(scale(cutree10_MF_matrix))))$order]
+
+cutree10_MF_upset <- UpsetPlotInput(cutree10_MF_matrix)
+
+cutree10_MF_upset$Cluster <- "5"
+plotUpsetPlot(cutree10_MF_upset)
+pheatmap(cutree10_MF_matrix)
+```
+##### not sure what I was doing here: crap code. 
+```{r, eval=F}
+cutree10_H_MF <- do.call(rbind, list(cutree10_MF_upset, cutree10_H_upset)) # combine list into 1 dataframe
+cutree10_H_MF$Type <- c(rep("GO:MF", nrow(cutree10_MF_upset)), rep("HallMark", nrow(cutree10_H_upset))) # column to specify type of enrichd term: Hallmark or GO:MF
+
+cutree10_H_MF$geneID <- factor(cutree10_H_MF$geneID, levels=c(colnames(cutree10_MF_matrix), colnames(cutree10_H_matrix)[!colnames(cutree10_H_matrix) %in% colnames(cutree10_MF_matrix)])) # convert geneID column into factor, with levels based on genes found in Hallmark terms first then under GO:MF terms (whatever is not in Hallmark terms)
+
+cutree10_H_MF$Pathways <- factor(cutree10_H_MF$Pathways, levels=rev(c(row.names(cutree10_MF_matrix), row.names(cutree10_H_matrix)))) # convert Pathways column into factor
+```
+#### look at subclusters with "EPITHELIAL MESENCHYMAL TRANSITION" as an enriched hallmark term and redo GO enrichment analysis to see what other pathways they play a role in
+```{r}
+# extract genes from sigMat that have "EPITHELIAL MESENCHYMAL TRANSITION" as an enriched pathway from GO enrichment analysis results ("cutree10_clusters_HallMark")
+EMT_sigMat <- ordered_sigMat[match(genes_anno_type[match(do.call(rbind, cutree10_H_PATHWAY2GENE[c(1,5,9)])[do.call(rbind, cutree10_H_PATHWAY2GENE[c(1,5,9)])$PATHWAY == "EPITHELIAL MESENCHYMAL TRANSITION", ]$geneID, genes_anno_type$gene_id), "ensembl_id"], row.names(ordered_sigMat)), ]
+
+row.names(EMT_sigMat) <- genes_anno_type[match(row.names(EMT_sigMat), genes_anno_type$ensembl_id), "gene_id"] # convert row names to gene symbol version
+
+EMT_anno <- data.frame(row.names=row.names(EMT_sigMat), cluster=as.factor(EMT_sigMat[ ,8])) # create annotation dataframe for EMT_sigMat with subclusters information (cutree=10)
+
+# display heatmap of rlog normalized read counts of EMT related genes
+set.seed(153)
+pheatmap(EMT_sigMat[!EMT_sigMat[ ,7]==1, -c(7,8)], scale="row", show_rownames = F, cluster_rows = T, annotation_row=EMT_anno, cutree_rows = 2)
+pheatmap(EMT_sigMat[, -c(7,8)], scale="row", show_rownames = F, cluster_rows = T, annotation_row=EMT_anno, cutree_rows = 2)
+```
+```{r}
+set.seed(153)
+hc_EMT <- hclust(t(dist(t(scale(t(EMT_sigMat[,-c(7,8)])))))) # do complete hierarchical clustering on scaled rlog transformed read counts of EMT_sigMat
+EMT_sigMat_ordered <- EMT_sigMat[hc_EMT$order, ] 
+pheatmap(EMT_sigMat_ordered[ ,-c(7,8)], scale="row", show_rownames = T, cluster_rows = F, annotation_row=EMT_anno)
+
+EMT_clusters_HallMark <- list()
+EMT_dotplots_HallMark <- list()
+EMT_genes <- list()
+for(i in 1:3){
+  EMT_genes[[i]] <- names(cutree(hc_EMT, 3)[cutree(hc_EMT, 3)==i]) # get gene names for each cluster & save in list
+  EMT_genes[[i]] <- genes_anno_type[genes_anno_type$gene_id %in% EMT_genes[[i]], "ensembl_id"]
+ names(EMT_genes)[i] <- paste("EMT", "Cluster", i)
+ 
+ EMT_clusters_HallMark[[i]] <- getGOenrichment(EMT_genes[[i]], as.character(universe$entrezid), msigdbr_t2g_H)
+ names(EMT_clusters_HallMark)[i] <- paste("HallMark:Cluster",i) 
+ 
+ EMT_dotplots_HallMark[[i]] <- dotplot(EMT_clusters_HallMark[[i]], showCategory=50, font.size=6, title=paste("Cluster", i, "enriched GO terms"))
+}
+
+EMT_PATHWAY2GENE <- PATHWAY2GENE(EMT_clusters_HallMark[[1]]) # the only cluster of EMT_sigMat to give other results other than "EPITHELIAL MESENCHYMAL TRANSITION"
+EMT_PATHWAY2GENE_mat <- PATHWAY2GENE_matrix(EMT_PATHWAY2GENE, EMT_clusters_HallMark[[1]])
+pheatmap(EMT_PATHWAY2GENE_mat)
+```
+#### look at subclusters with "UV RESPONSE" as an enriched hallmark term and redo GO enrichment analysis to see what other pathways they play a role in. 
+##### I was going to do the same as I did for EMT_sigMat but decided not to pursue this further. 
+```{r}
+# extract genes from sigMat that have "UV RESPONSE" as an enriched pathway from GO enrichment analysis results ("cutree10_clusters_HallMark")
+UV_sigMat <- ordered_sigMat[match(genes_anno_type[match(do.call(rbind, cutree10_H_PATHWAY2GENE[c(1,5,9)])[do.call(rbind, cutree10_H_PATHWAY2GENE[c(1,5,9)])$PATHWAY == "UV RESPONSE DN", ]$geneID, genes_anno_type$gene_id), "ensembl_id"], row.names(ordered_sigMat)), ]
+
+# display heatmap of rlog normalized read counts of genes part of "UV RESPONSE" pathway
+pheatmap(UV_sigMat[ , -c(7,8)], scale="row", show_rownames = F, cluster_rows = T, annotation_row=data.frame(row.names=row.names(UV_sigMat), cluster=as.factor(UV_sigMat[ ,8])))
+```
+
+# 9-30-2022: Reclustering clusters with shared cell cycle arrest signature (clusters 5 & 6 from ordered_sigMat) to see what pathways are commonly enriched
+```{r}
+
+sigMat_5and6 <- ordered_sigMat[ordered_sigMat[ ,7] == 6 | ordered_sigMat[ ,7] == 5, ]
+anno <- data.frame(row.names=row.names(sigMat_5and6), cluster=as.factor(sigMat_5and6[ ,7]))
+pheatmap(sigMat_5and6[ ,-c(7,8)], annotation_row=anno, scale="row", show_rownames = F, cutree_rows = 3, cluster_rows = F)
+
+set.seed(153)
+hc_5 <- cutree(hclust(t(dist(t(scale(t(sigMat_5and6[ sigMat_5and6[, 7]==5,-c(7,8)])))))),k=2)  # do complete hierarchical clustering on scaled rlog transformed read counts
+
+
+pheatmap(sigMat_5and6[, -c(7,8)], scale="row", show_rownames = F, cutree_rows=3, annotation_colors = mycolors, annotation_row=annotation)
+
+
+GOenrich_cluster5 <- list()
+dotplots_cluster5 <- list()
+for(i in 1:2){
+ GOenrich_cluster5[[i]] <- getGOenrichment(names(hc_5[hc_5==i]), as.character(universe$entrezid) , msigdbr_t2g_REACT) # do GO enrichment analysis with background gene set set as all gene expressed, database used is msigdb GO:BP
+ names(GOenrich_cluster5)[i] <- paste("Cluster 5.",i) 
+ dotplots_cluster5[[i]] <- dotplot(GOenrich_cluster5[[i]], showCategory=5, font.size=6, title=paste("Cluster 5.", i, "enriched GO terms"))
+}
+grid.arrange(grobs=dotplots_cluster5)
+```
+
+# determining expression of chromatin remodellers each hierarchical cluster of sigMat is characterized by. 
+```{r}
+Chromatin_Remodelling_msigdbr <- msigdbr_df_GO_BP[msigdbr_df_GO_BP$gs_exact_source %in% "GO:0006338", ] # filter msigdbr GO:BP database by CHROMATIN_REMODELING term
+
+CR_Clust <- list()
+for(i in 1:length(genes_in_clusters_2)){
+CR_Clust[[i]] <- Chromatin_Remodelling_msigdbr[Chromatin_Remodelling_msigdbr$human_ensembl_gene %in% genes_in_clusters_2[[i]], c("gene_symbol", "ensembl_gene")]
+CR_Clust[[i]]$cluster <- as.numeric(i)
+} # filter for genes from each hierarchical cluster in sigMat that are chromatin remodellers
+CR_Clust <- do.call(rbind, CR_Clust)
+kable(CR_Clust, format="html")
+```
+
+# 10-14-2022: looking at GREM1 affected genes, a prosenescent molecule described in Baboota, R.K., Rawshani, A., Bonnet, L. et al. BMP4 and Gremlin 1 regulate hepatic cell senescence during clinical progression of NAFLD/NASH. Nat Metab 4, 1007–1021 (2022)
+```{r}
+# genes with differential expression via GREM1 treatment: RNA-seq of GREM1-treated IHH cells
+GREM1_genes <- read_excel("/lustre/fs4/risc_lab/scratch/jyeung/LS_PDvsDoxo_1/RNAseq/post_kallisto_analysis/Other_Resources/Baboota_Rawshani_Bonnet_et_al.Nat Metab(2022)_Suppl_Tables.xlsx", sheet = "Supplementary Table 3")
+# filter for sig genes (padj < 0.05)
+GREM1_genes <- as.data.frame(GREM1_genes[GREM1_genes$`P-ADJ` < 0.05, 1:5])
+GREM1_genes <- GREM1_genes[!duplicated(GREM1_genes$`Gene name`), ][-2, ]  
+
+row.names(GREM1_genes) <- make.names(genes_anno_type[match(GREM1_genes$`Gene name`, genes_anno_type$gene_id), "ensembl_id"], unique=T)
+
+# get rlog normalized counts of GREM1 regulated sig changing genes
+GREM1_Mat <- sigMat[row.names(sigMat) %in% row.names(GREM1_genes), ]
+
+# plot heatmap of sig changing GREM1 regulated genes
+pheatmap(GREM1_Mat, scale="row", show_rownames = F, annotation_row=GREM1_genes[ ,-c(1,3,4)])
+```
+# see which GREM1 target genes are also sig changing SASP genes
+```{r}
+setwd("/lustre/fs4/risc_lab/scratch/jyeung/LS_PDvsDoxo_1/RNAseq/post_kallisto_analysis/workspaces/")
+load("LS_PDvsDoxo_1_RNAseq_analysis_SASPgenes.RData")
+pheatmap(GREM1_Mat[row.names(GREM1_Mat) %in% row.names(SASP_genes_sigMat), ], scale="row", show_rownames = T, annotation_row=GREM1_genes[ ,-c(1,3,4)])
+```
+```{r}
+hc_GREM1 <- hclust(t(dist(t(scale(t(GREM1_Mat)))))) # convert to dist object for hclust function to accept, do complete hierarchical clustering on scaled rlog transformed read counts
+
+GREM1_genes$cluster <- as.factor(cutree(hc_GREM1, k=6)[match(row.names(GREM1_genes), names(cutree(hc_GREM1, k=6)))]) # cut the tree to 6 clusters. This object gives the genes that belong to each cluster. Match it back to GREM1_genes dataframe to provide cluster info for each gene. 
+
+GREM1_genes$sigMat_cluster <- as.factor(ordered_sigMat[match(row.names(GREM1_genes), row.names(ordered_sigMat)), "cluster"]) # provide cluster that GREM1 target genes belong to from entire collection of sig changing genes (sigMat)
+
+# display heatmap of GREM1 target genes also sig changing in our dataset with cluster info from sigMat. 
+pheatmap(GREM1_Mat, scale="row", show_rownames = F, annotation_row=GREM1_genes[ ,c("cluster", "sigMat_cluster", "DIRECTION")])
+
+# get gene ids of genes in each GREM1_Mat cluster that go up with GREM1 treatment from RNA-seq dataset on IHH cells 
+GREM1_UPgenes <- list()
+for(i in 1:length(levels(GREM1_genes$cluster))){
+GREM1_UPgenes[[i]] <- data.frame(gene_id=genes_anno_type[genes_anno_type$ensembl_id %in% row.names(GREM1_genes[GREM1_genes$cluster %in% i & GREM1_genes$DIRECTION %in% "UP", ]), "gene_id"], cluster=i)
+}
+lapply(GREM1_UPgenes, kable, format="html")
+```
+##### was attempting to match GREM1_UP genes to genes found under enriched terms from GO analysis on sigMat clusters. But nothing interesting or worthwhile to pursue. 
+```{r}
+# make list of genes under enriched terms from GO enrichment analysis of sigMat clusters with REACTOME database 
+GO_REACTclust_genes <- list()
+for(i in 1:length(GO_enrichment_clusters_REACT)){
+GO_REACTclust_genes[[i]] <- strsplit(GO_enrichment_clusters_REACT[[i]]$geneID, "/") # split gene ids into individual objects in vector
+names(GO_REACTclust_genes)[i] <- paste("Cluster", i) # name each object in list by cluster
+for(j in 1:length(GO_enrichment_clusters_REACT[[i]]$ID)){
+  names(GO_REACTclust_genes[[i]])[j] <- GO_enrichment_clusters_REACT[[i]][j]$ID # provide names of enriched pathways for each object in list of list. 
+}
+}
+
+```
+
+# 2023-02-16: checking for gene expression levels changes in hits found in Justin's Palbo vs Abema RNA-seq analysis: 
+### CCDC30
+### macroH2A
+### all HLA genes
+### HLA-DRB1 & HLA-DRBA (very significant increase in accessibility at their locus on both Palbo & Abema)
+```{r}
+
+```
+
+```{r}
+sessionInfo()
+```
+# random crap
+```{r, eval=F}
+n <- c()
+for(i in 1:577){
+n <- str_c(n, genes_anno_type[genes_anno_type$ensembl_id %in% names(hc_5[hc_5 ==1]), 1][i], sep="\n")  
+}
+
+n <- c()
+for(i in 1:811){
+n <- str_c(n, genes_anno_type[genes_anno_type$ensembl_id %in% row.names(sigMat_5and6[sigMat_5and6[ ,7]==6, ]), 1][i], sep="\n")  
+}
+
+```

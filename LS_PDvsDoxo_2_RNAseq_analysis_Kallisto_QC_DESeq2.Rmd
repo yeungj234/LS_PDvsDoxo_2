@@ -1,0 +1,1157 @@
+---
+title: "LS_PDvsDoxo_2_RNAseq_analysis_Kallisto_QC_DESeq2"
+author: "Joanna Yeung"
+date: "2/23/2023"
+output: html_document
+---
+#### This script contains initial RNA-seq analysis of experiment code: LS_PDvsDoxo_2 where a comparison between 1uM Palbo & 100nM of Doxo treatment was done for the same timepoints in LS8817 cells (This is a second biological replicate to LS_PDvsDoxo_1)
+
+### *WHAT WAS DONE*
+##### IMPORT KALLISTO PSEUDOCOUNTS: import transcript counts after running kallisto
+##### DIFFERENTIAL EXPRESSION ANALYSIS WITH DESEQ2: 1st done with Wald Test for pairwise comparison between treatments, then Likelihood Ratio Test for hierarchical clustering of rlog normalized read counts. 
+###### sigMat: rlog normalized read count matrix filtered by sig changing genes based on  padj < 0.05 from LRT
+##### PLOTS: 
+###### MA plots
+###### PCA plots
+###### sample correlation matrix
+###### overall normalized read counts across treatment conditions
+###### scatterplots btwn different samples (check for variance across different samples)
+##### CLUSTERING: clustering of genes that were sig changing across conditions (sigMat) as indicated by DESeq done with LRT
+###### K-means clustering: tried with 3 and 4 k-means
+###### Complete hierarchical clustering: cut tree into 7 clusters
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(message = FALSE)
+```
+#load packages
+```{r}
+library(readr)
+library(tximport)
+library(GenomicFeatures)
+library(DESeq2)
+library(apeglm)
+library(gridExtra)
+library(ggplot2)
+library(pheatmap)
+library(clusterProfiler)
+library(msigdbr)
+library(stringr)
+library(pheatmap)
+library(org.Hs.eg.db)
+library(ggrepel)
+library(rtracklayer)
+library(cowplot)
+library(readxl)
+library(EnsDb.Hsapiens.v79)
+library(sva)
+library(ashr)
+library(viridis)
+```
+# **IMPORT KALLISTO PSEUDOCOUNTS:** 
+
+### specify sample names and paths to kallisto output files. 
+### working with pseudoreplicates of Cycling controls and biological reps of Doxo & Palbo. 
+```{r}
+workdir <- "/lustre/fs4/risc_lab/scratch/jyeung/LS_PDvsDoxo_2/RNAseq/kallisto_02232023"
+samplenames <- c("Cycling_1", "d3-Doxo_1", "d14-Doxo_1", "d21-Doxo_VIAL1", "d3-Palbo_1", "d14-Palbo_1", "d21-Palbo_VIAL1", "d28-Palbo_VIAL1", "Cycling_2", "d3-Doxo_2", "d21-Doxo_VIAL2", "d3-Palbo_2", "d21-Palbo_VIAL2", "d28-Palbo_VIAL2")
+
+sampledir <- c()
+  for(i in 1:length(samplenames)){
+sampledir[i] <- paste0("/lustre/fs4/risc_lab/scratch/jyeung/LS_PDvsDoxo_2/RNAseq/kallisto_02232023", "/", samplenames[i], "/", "abundance.h5")
+}
+names(sampledir) <- samplenames
+```
+
+### make TxDb object from V29 transcriptome index file--> later, this will be used to convert to different gene id annotations. 
+```{r, eval=F}
+TxDbGenCode_v29 <- makeTxDbFromGFF("/lustre/fs4/risc_lab/store/jyeung/indexes/V29_Kallisto_index/gencode.v29.primary_assembly.annotation_UCSC_names.gtf", format="gtf", dataSource="GENCODE", organism="Homo sapiens")
+k <- keys(TxDbGenCode_v29, keytype = "TXNAME")
+ensk <- keys(EnsDb.Hsapiens.v79, keytype="SYMBOL")
+tx2gene <- AnnotationDbi::select(TxDbGenCode_v29, k, "GENEID", "TXNAME")
+ensemblgene2symbol <-AnnotationDbi::select(EnsDb.Hsapiens.v79, ensk, "GENEID", "SYMBOL")
+
+tx2gene <- read.csv("/lustre/fs4/risc_lab/scratch/jyeung/LS_PDvsDoxo_1/RNAseq/TxDbGenCode_v29.csv")
+tx2gene <- tx2gene[, 2:3]
+```
+
+### import kallisto output files, matching transcript id to gene id. this part, you need to switch to conda env, jr_rna
+```{r, echo=F}
+load("/lustre/fs4/risc_lab/scratch/jyeung/LS_PDvsDoxo_2/RNAseq/post_kallisto_analysis/workspaces/txi.kallisto.RData")
+# load genes_anno_type database matching ensembl, entrez & symbol ids of genes (VERSION 107 OF ENSEMBL ID & VERSION P14 OF ENTREZ ID (LATEST VERSION))
+load("/lustre/fs4/risc_lab/scratch/jyeung/LS_PDvsDoxo_1/RNAseq/post_kallisto_analysis/workspaces/genes_anno_type.RData")
+```
+```{r, eval=F}
+txi.kallisto <- tximport(sampledir, type = "kallisto", tx2gene=tx2gene, ignoreAfterBar = T)
+head(txi.kallisto$counts)
+save(txi.kallisto, file="/lustre/fs4/risc_lab/scratch/jyeung/LS_PDvsDoxo_2/RNAseq/post_kallisto_analysis/workspaces/txi.kallisto.RData")
+```
+
+# color scheme for PCA plots
+```{r}
+# color scheme for Palbok timepoints & biological replicates
+Pcols <- c("Cycling: 0:1"="#F8766D", "Cycling: 0:2"="#FBADA7", "Cycling: 0:3"="#FDDEDC", "Palbo:10:3"="#ECCEE1", "Palbo:14:1"="#E0ADCD", "Palbo:14:3"="#A8829A", "Palbo:21:1"="#B23282", "Palbo:21:2"="#4C0E35", "Palbo:28:1"="#72BBC2", "Palbo:28:2"="#148D99", "Palbo: 3:1"="#D6C3C0", "Palbo: 3:2"="#9D8E8A")
+# color scheme for Doxo timepoints & biological replicates
+Dcols <- c("Doxo:10:3"="#D1DC8E", "Doxo:14:1"="#B3C543", "Doxo:14:3"="#869432", "Doxo:21:1"="#6F7835", "Doxo:21:2"="#383C1B", "Doxo: 3:1"="#D7AB33", "Doxo: 3:2"="#EBD599")
+```
+
+# **DIFFERENTIAL EXPRESSION ANALYSIS WITH DESEQ2**:
+
+### perform DESeq on DESEq Dataset
+```{r}
+#with Cyc as control to compare conditions against:
+#metaData <- data.frame(samplenames, Condition=as.factor(c("Cycling", "Cycling", "day14-Doxo", "day14-Palbo", "day21-Doxo", "day21-Doxo", "day21-Palbo", "day21-Palbo", "day28-Palbo", "day28-Palbo", "day3-Doxo","day3-Doxo", "day3-Palbo", "day3-Palbo"  )), Biorep=as.factor(c("1","2", "1", "1", "1", "2", "1", "2", "1", "2", "1", "2", "1", "2")), Treatment=as.factor(c("None_1", "None_2", "Doxo", "Palbo", "Doxo", "Doxo", "Palbo", "Palbo", "Palbo", "Palbo", "Doxo","Doxo", "Palbo", "Palbo")),Timepoint=as.factor(c("0", "0", "14", "14", "21", "21", "21", "21", "28", "28", "3","3", "3", "3"  ))) 
+
+# generate design dataframe
+metaData <- data.frame(Biorep=c(rep("1", 8), rep("2", 6)), 
+         treatment=c("Cycling",rep("Doxo", 3), rep("Palbo", 4), "Cycling", rep("Doxo", 2),rep("Palbo", 3)), 
+         time=c("0", "0", "14", "21", "0", "14", "21", "28", "0", "0", "21","0", "21", "28")
+         )
+
+         
+#import kallisto counts into a DESeq object with experimental design specificed
+RNAdds <- DESeqDataSetFromTximport(txi.kallisto, metaData, ~Biorep+treatment+time)
+keep <- rowSums(counts(RNAdds)) >= 30 # filter out rows with rowsum less than 30 to remove genes that aren't being expressed across samples. 
+RNAdds <- RNAdds[keep,]
+# perform DESeq
+RNAdds <- DESeq(RNAdds)
+
+write.csv(assay(RNAdds), "/lustre/fs4/risc_lab/scratch/jyeung/LS_PDvsDoxo_2/RNAseq/post_kallisto_analysis/DESeq2_results/dds_raw_counts_matrix.csv") #save raw counts matrix
+
+# combine experimental design levels to make it easier to extract results for pairwise comparisons of samples
+RNAdds$group <- factor(paste0(RNAdds$treatment, RNAdds$time))
+design(RNAdds) <- ~ group
+# perform DESeq again
+RNAdds <- DESeq(RNAdds)
+resultsNames(RNAdds)
+results(RNAdds, contrast=c("group", "Doxo0", "Doxo14"))
+```
+# **PCA & SAMPLE CORRELATION**: 
+```{r}
+RNAdds_rlog <- rlog(RNAdds) #perform rlog transformation for visualization and clustering
+```
+```{r, eval=F}
+write.csv(assay(RNAdds_rlog), "/lustre/fs4/risc_lab/scratch/jyeung/LS_PDvsDoxo_2/RNAseq/post_kallisto_analysis/DESeq2_results/dds_rlog_counts_matrix.csv") #save rlog transformed counts matrix
+```
+
+### plot PCA plots of uncorrected counts
+```{r}
+#plot PCA
+PCA1 <- plotPCA(RNAdds_rlog, intgroup=c("treatment", "time"))+theme_classic()+geom_point(size=5)+scale_colour_manual(values=c("Cycling:0"="#F8766D", "Doxo:0"="#EBD599", "Doxo:14"="#B3C543", "Doxo:21"="#6F7835", "Palbo:3"="#9D8E8A", "Palbo:14"="#E0ADCD", "Palbo:21"="#B23282", "Palbo:28"="#72BBC2"))
+```
+
+### plot sample correlation heatmap of uncorrected counts 
+```{r}
+sampleDists <- dist(t(assay(RNAdds_rlog)))
+sampleDists <- as.dist(1 - sampleDists)
+sampleDistMatrix <- as.matrix(sampleDists)
+cor.matrix <-cor(sampleDistMatrix, method="pearson") # Compute the correlation of the distance measure between pairwise samples. 
+pheatmap(cor.matrix)
+cor_heatmap <- pheatmap(cor.matrix)
+```
+
+#### it looks like there are batch effects between the two cycling controls. I'll use Combat_seq to try to remove the batch effects. 
+```{r}
+combatRawCounts <- ComBat_seq(
+  # raw count matrix filtered for peaks with rowSums >=40 reads 
+    assay(RNAdds), 
+  # batch info, i.e. different experiments
+    batch = metaData$Biorep, 
+  # biological info, i.e. time points
+    group = NULL,
+  # full_mod = TRUE if you want to incorporate group conditons
+    full_mod = F)
+# reformat ComBat_seq output into a RangedSummarizedExperiment object 
+combatCounts <- DESeqDataSetFromMatrix(combatRawCounts, colData = metaData, design=~Biorep+treatment+time)
+# rlog normalize counts for visualization
+rlogcombatCounts <- rlog(combatCounts)
+
+# combine experimental design levels to make it easier to extract results for pairwise comparisons of samples
+combatCounts$group <- factor(paste0(combatCounts$treatment, combatCounts$time))
+design(combatCounts) <- ~ group
+# perform DESeq again
+combatCounts <- DESeq(combatCounts)
+resultsNames(combatCounts)
+results(combatCounts, contrast=c("group", "Doxo0", "Doxo14"))
+```
+### plot PCA plots of Combat batch corrected counts
+```{r}
+PCA2 <- plotPCA(rlogcombatCounts, intgroup=c("treatment", "time"))+theme_classic()+geom_point(size=5)+scale_colour_manual(values=c("Cycling:0"="#F8766D", "Doxo:0"="#EBD599", "Doxo:14"="#B3C543", "Doxo:21"="#6F7835", "Palbo:3"="#9D8E8A", "Palbo:14"="#E0ADCD", "Palbo:21"="#B23282", "Palbo:28"="#72BBC2"))
+```
+
+### plot sample correlation heatmap of Combat batch corrected counts
+```{r}
+sampleDistsCombat <- dist(t(assay(rlogcombatCounts)))
+sampleDistsCombat <- as.dist(1 - sampleDistsCombat)
+sampleDistCombatMatrix <- as.matrix(sampleDistsCombat)
+cor.combatmatrix <-cor(sampleDistCombatMatrix, method="pearson")
+cor_combatheatmap <- pheatmap(cor.combatmatrix)
+cor_combatheatmap
+```
+
+#### according to Combat-seq manual, te defult is to put in information for covar_mod argument so I redid batch correction again. 
+```{r}
+combatRawCounts2 <- ComBat_seq(
+  # raw count matrix filtered for peaks with rowSums >=40 reads 
+    assay(RNAdds), 
+  # batch info, i.e. different experiments
+    batch = metaData$Biorep, 
+  # biological info, i.e. time points
+    covar_mod = metaData[ ,c("treatment", "time")] ,
+  # full_mod = TRUE if you want to incorporate group conditons
+    full_mod = T)
+
+# reformat ComBat_seq output into a RangedSummarizedExperiment object 
+combatCounts2 <- DESeqDataSetFromMatrix(combatRawCounts2, colData = metaData, design=~Biorep+treatment+time)
+# rlog normalize counts for visualization
+rlogcombatCounts2 <- rlog(combatCounts2)
+# combine experimental design levels to make it easier to extract results for pairwise comparisons of samples
+combatCounts2$group <- factor(paste0(combatCounts2$treatment, combatCounts2$time))
+design(combatCounts2) <- ~ group
+# perform DESeq again
+combatCounts2 <- DESeq(combatCounts2)
+resultsNames(combatCounts2)
+```
+### plot PCA plots of Combat batch corrected counts with biological information (covar_mod) incorporated in the batch correction model
+```{r}
+PCA3 <- plotPCA(rlogcombatCounts2, intgroup=c("treatment", "time"))+theme_classic()+geom_point(size=5)+scale_colour_manual(values=c("Cycling:0"="#F8766D", "Doxo:0"="#EBD599", "Doxo:14"="#B3C543", "Doxo:21"="#6F7835", "Palbo:3"="#9D8E8A", "Palbo:14"="#E0ADCD", "Palbo:21"="#B23282", "Palbo:28"="#72BBC2"))
+```
+
+### plot sample correlation heatmap of Combat batch corrected counts with biological information (covar_mod) incorporated in the batch correction model 
+```{r}
+sampleDistscombat2 <- dist(t(assay(rlogcombatCounts2)))
+sampleDistscombat2 <- as.dist(1 - sampleDistscombat2)
+sampleDistcombat2Matrix <- as.matrix(sampleDistscombat2)
+cor.combat2matrix <-cor(sampleDistcombat2Matrix, method="pearson")
+cor_combat2heatmap <- pheatmap(cor.combat2matrix)
+cor_combat2heatmap
+```
+
+# plot PCA plots and sample correlation matrices from before vs after Combat correction. 
+```{r}
+grid.arrange(grobs=list(PCA1, PCA2, PCA3, cor_heatmap[[4]], cor_combatheatmap[[4]], cor_combat2heatmap[[4]]), ncol=3, nrow=2)
+```
+
+# plot dispersion estimates before vs after Combat correction. 
+```{r}
+plotDispEsts(RNAdds)
+plotDispEsts(combatCounts)
+plotDispEsts(combatCounts2)
+```
+
+# **MA PLOTS**: 
+```{r}
+# MA plots before combat correction
+pdf(file="/lustre/fs4/risc_lab/scratch/jyeung/LS_PDvsDoxo_2/RNAseq/post_kallisto_analysis/DESeq2_results/MAplots.pdf", width=10, height=8)
+
+par(mfrow=c(2,2))
+par(mfrow=c(2,2))
+# comparison with Cycling as control
+for(i in 1:7){
+plotMA(lfcShrink(RNAdds, contrast=c("group", as.character(unique(RNAdds$group)[i+1]), as.character(unique(RNAdds$group)[1])), type="ashr"), alpha=0.05, ylim=c(-6,6), main= paste(as.character(unique(RNAdds$group)[i+1]), "vs", as.character(unique(RNAdds$group)[1])))
+}
+# comparison with day3 Doxo as control
+for(i in 1:6){
+plotMA(lfcShrink(RNAdds, contrast=c("group", as.character(unique(RNAdds$group)[i+2]), as.character(unique(RNAdds$group)[2])), type="ashr"), alpha=0.05, ylim=c(-6,6), main=paste( as.character(unique(RNAdds$group)[i+2]), "vs", as.character(unique(RNAdds$group)[2])))
+}
+# comparison with day3 Palbo as control
+for(i in c(3,4,6:8)){
+plotMA(lfcShrink(RNAdds, contrast=c("group", as.character(unique(RNAdds$group)[i]), as.character(unique(RNAdds$group)[5])), type="ashr"), alpha=0.05, ylim=c(-6,6), main=paste( as.character(unique(RNAdds$group)[i]), "vs", as.character(unique(RNAdds$group)[5])))
+}
+dev.off()
+```
+
+```{r}
+# MA plots after combat correction
+pdf(file="/lustre/fs4/risc_lab/scratch/jyeung/LS_PDvsDoxo_2/RNAseq/post_kallisto_analysis/DESeq2_results/CombatMAplots.pdf", width=10, height=8)
+
+par(mfrow=c(2,2))
+# comparison with Cycling as control
+for(i in 1:7){
+plotMA(lfcShrink(combatCounts, contrast=c("group", as.character(unique(combatCounts$group)[i+1]), as.character(unique(combatCounts$group)[1])), type="ashr"), alpha=0.05, ylim=c(-6,6), main= paste(as.character(unique(combatCounts$group)[i+1]), "vs", as.character(unique(combatCounts$group)[1])))
+}
+# comparison with day3 Doxo as control
+for(i in 1:6){
+plotMA(lfcShrink(combatCounts, contrast=c("group", as.character(unique(combatCounts$group)[i+2]), as.character(unique(combatCounts$group)[2])), type="ashr"), alpha=0.05, ylim=c(-6,6), main=paste( as.character(unique(combatCounts$group)[i+2]), "vs", as.character(unique(combatCounts$group)[2])))
+}
+# comparison with day3 Palbo as control
+for(i in c(3,4,6:8)){
+plotMA(lfcShrink(combatCounts, contrast=c("group", as.character(unique(combatCounts$group)[i]), as.character(unique(combatCounts$group)[5])), type="ashr"), alpha=0.05, ylim=c(-6,6), main=paste( as.character(unique(combatCounts$group)[i]), "vs", as.character(unique(combatCounts$group)[5])))
+}
+dev.off()
+```
+
+```{r}
+# MA plots after combat correction with information in covar_mod
+pdf(file="/lustre/fs4/risc_lab/scratch/jyeung/LS_PDvsDoxo_2/RNAseq/post_kallisto_analysis/DESeq2_results/Combatwithcovar_modMAplots.pdf", width=10, height=8)
+par(mfrow=c(2,2))
+# comparison with Cycling as control
+for(i in 1:7){
+plotMA(lfcShrink(combatCounts2, contrast=c("group", as.character(unique(combatCounts2$group)[i+1]), as.character(unique(combatCounts2$group)[1])), type="ashr"), alpha=0.05, ylim=c(-6,6), main= paste(as.character(unique(combatCounts2$group)[i+1]), "vs", as.character(unique(combatCounts2$group)[1])))
+}
+# comparison with day3 Doxo as control
+for(i in 1:6){
+plotMA(lfcShrink(combatCounts2, contrast=c("group", as.character(unique(combatCounts2$group)[i+2]), as.character(unique(combatCounts2$group)[2])), type="ashr"), alpha=0.05, ylim=c(-6,6), main=paste( as.character(unique(combatCounts2$group)[i+2]), "vs", as.character(unique(combatCounts2$group)[2])))
+}
+# comparison with day3 Palbo as control
+for(i in c(3,4,6:8)){
+plotMA(lfcShrink(combatCounts2, contrast=c("group", as.character(unique(combatCounts2$group)[i]), as.character(unique(combatCounts2$group)[5])), type="ashr"), alpha=0.05, ylim=c(-6,6), main=paste( as.character(unique(combatCounts2$group)[i]), "vs", as.character(unique(combatCounts2$group)[5])))
+}
+dev.off()
+```
+## *function*: to plot informative MA plots called ggplotMA
+```{r}
+ggplotMA <- function(data, genes, Title, LFCthreshold){
+  data$Color <- ifelse(data$padj < 0.05, "padj < 0.05", "padj > 0.05") #column to be used for coloring based on padj threshold value. 
+  MAdefault <- function(data, Title){
+ggplot(as.data.frame(data), aes(x=baseMean, y=log2FoldChange, color=Color))+
+scale_colour_manual(values=c("red", "grey"))+
+geom_point(data=as.data.frame(data), aes(x=baseMean, y=log2FoldChange), size=0.1)+
+geom_point(data=as.data.frame(data[abs(data$log2FoldChange) > LFCthreshold & data$padj < 0.05 & !is.na(data$padj), ]), aes(x=baseMean, y=log2FoldChange), size=0.1,color="pink")+
+scale_x_continuous(trans='log10')+
+ggtitle(paste(Title, "MAPlot", '\n', "num. of sig genes=", as.character(nrow(data[data$padj < 0.05 & !is.na(data$padj), ]))))+
+xlab("log10 Base Mean")+
+theme_classic()+
+theme(text = element_text(size = 20))+
+labs(color="Significance")
+  }
+if(is.null(genes) == TRUE){
+ MAdefault(data, Title)
+}else{
+topGene <- data[abs(data$log2FoldChange) > LFCthreshold & data$padj < 0.05 & !is.na(data$padj), ]
+topGene <-topGene[order(topGene$padj, decreasing=F), ]
+topGene <- ifelse(topGene$SYMBOL %in% NA, row.names(topGene), topGene$SYMBOL)
+topGene <- topGene[1:20]
+
+MAdefault(data, Title) + geom_point(data=as.data.frame(data[data$SYMBOL %in% topGene, ]), aes(x=baseMean, y=log2FoldChange), color="blue", size=0.1)+ #color top user specified number of significant genes in blue 
+geom_text_repel(data=as.data.frame(data[data$SYMBOL %in% topGene, ]), aes(x=baseMean, y=log2FoldChange, label=SYMBOL), colour="black",  max.overlaps=getOption("ggrepel.max.overlaps", default = 20))
+  }
+}
+
+
+#+geom_label(label=as.character(nrow(data[data$padj < 0.05 & !is.na(data$padj), ])),  x=4.1,y=20)
+```
+
+### get log2FoldChange DESeq results for pairwise comparisons (with Wald Test)
+```{r}
+LFCResults <- list()
+# comparison with Cycling as control
+for(i in 1:7){
+LFCResults[[i]] <- results(combatCounts2, contrast=c("group", as.character(unique(combatCounts2$group)[i+1]), as.character(unique(combatCounts2$group)[1])))
+LFCResults[[i]]$SYMBOL <- genes_anno_type[match(gsub('\\.[0-9]*$', '', row.names(LFCResults[[i]])), genes_anno_type$ensembl_id), ]$gene_id
+names(LFCResults)[[i]] <- paste(as.character(unique(combatCounts2$group)[i+1]), "vs", as.character(unique(combatCounts2$group)[1]))
+}
+# comparison with day3 Doxo as control
+for(i in 1:6){
+LFCResults[[i+7]] <- results(combatCounts2, contrast=c("group", as.character(unique(combatCounts2$group)[i+2]), as.character(unique(combatCounts2$group)[2])))
+LFCResults[[i+7]]$SYMBOL <- genes_anno_type[match(gsub('\\.[0-9]*$', '', row.names(LFCResults[[i+7]])), genes_anno_type$ensembl_id), ]$gene_id
+names(LFCResults)[[i+7]] <- paste(as.character(unique(combatCounts2$group)[i+2]),"vs", as.character(unique(combatCounts2$group)[2]))
+}
+# comparison with day3 Palbo as control
+for(i in c(3,4,6:8)){
+LFCResults[[i+13]] <- results(combatCounts2, contrast=c("group", as.character(unique(combatCounts2$group)[i]), as.character(unique(combatCounts2$group)[5])))
+LFCResults[[i+13]]$SYMBOL <- genes_anno_type[match(gsub('\\.[0-9]*$', '', row.names(LFCResults[[i+13]])), genes_anno_type$ensembl_id), ]$gene_id
+}
+# remove objects in list which are NULL 
+LFCResults <- LFCResults[!sapply(LFCResults,is.null)]
+# then name the last 5 objects in list which had day3 Palbo as control
+names(LFCResults)[14:18] <- paste(as.character(unique(combatCounts2$group)[c(3,4,6:8)]),"vs", as.character(unique(combatCounts2$group)[5]))
+
+# write DESeq2 results to csv files. 
+for(i in 1:length(LFCResults)){
+write.csv(LFCResults[[i]], file=paste0("/lustre/fs4/risc_lab/scratch/jyeung/LS_PDvsDoxo_2/RNAseq/post_kallisto_analysis/DESeq2_results/", gsub(" ", "_", names(LFCResults)[i]), "_Combatwithcovar_mod.csv"))  
+}
+```
+
+### plot more informative MA plots
+```{r}
+ggMAPlots <- list()
+for(i in 1:length(LFCResults)){
+  ggMAPlots[[i]] <- ggplotMA(LFCResults[[i]], genes=1:20, Title=names(LFCResults)[i])
+}
+pdf(file="/lustre/fs4/risc_lab/scratch/jyeung/LS_PDvsDoxo_2/RNAseq/post_kallisto_analysis/DESeq2_results/ggMAPlots.pdf", width=10, height=8)
+par(mfrow=c(2,2))
+ggMAPlots
+dev.off()
+```
+
+#### comparing gene counts across different samples via scatterplot. This is a QC metric of visualizing & comparing variance between biological reps vs across treatments.
+```{r}
+# create dataframe of unique combinations of sample comparisons: 
+
+# make empty nested list
+combos <- vector("list", length=19)
+for(i in 1:length(combos)){
+  combos[[i]] <- vector("list", length=19)
+}
+# make dataframe of combinations
+for(i in 1:14){
+  for(j in 1:14){
+   combos[[i]][[j]]<- data.frame(one=i, two=j)
+  }
+  combos[[i]] <- do.call(rbind, combos[[i]]) # unlist into 1 dataframe per list object
+}
+combos <- do.call(rbind, combos) # make whole list into 1 dataframe
+# remove rows that are not unique combinations (e.g. 1,2 and 2,1 are the same combination)
+combos_uniq <- combos[!duplicated(apply(combos[,1:2], 1, function(row) paste(sort(row), collapse=""))),]
+# remove duplicate combinations since you are just comparing the same sample to itself (e.g. 1,1 or 2,2)
+combos_uniq <- combos_uniq[-c(which(combos_uniq[ ,1] == combos_uniq[ ,2])), ]
+
+# plot rlog normalized counts of samples to compare variance of counts across conditions and between conditions. 
+
+# before combat correction
+pdf(file="/lustre/fs4/risc_lab/scratch/jyeung/LS_PDvsDoxo_2/RNAseq/post_kallisto_analysis/DESeq2_results/varianceQC.pdf", width=10, height=8)
+par(mfrow=c(4,4))
+for(i in 1:nrow(combos_uniq)){
+ plot(assay(RNAdds_rlog)[ ,c(combos_uniq[i, 1],combos_uniq[i, 2])], pch=20, cex=0.1) 
+  }
+dev.off()
+
+# after combat correction
+pdf(file="/lustre/fs4/risc_lab/scratch/jyeung/LS_PDvsDoxo_2/RNAseq/post_kallisto_analysis/DESeq2_results/varianceQC_Combat.pdf", width=10, height=8)
+par(mfrow=c(4,4))
+for(i in 1:nrow(combos_uniq)){
+ plot(assay(rlogcombatCounts)[ ,c(combos_uniq[i, 1],combos_uniq[i, 2])], pch=20, cex=0.1) 
+  }
+dev.off()
+
+# after combat correction with information in covar_mod
+pdf(file="/lustre/fs4/risc_lab/scratch/jyeung/LS_PDvsDoxo_2/RNAseq/post_kallisto_analysis/DESeq2_results/varianceQC_Combatwithcovar_mod.pdf", width=10, height=8)
+par(mfrow=c(4,4))
+for(i in 1:nrow(combos_uniq)){
+ plot(assay(rlogcombatCounts2)[ ,c(combos_uniq[i, 1],combos_uniq[i, 2])], pch=20, cex=0.1) 
+  }
+dev.off()
+```
+
+## The DEseq2 normTransform() will add a 1 to our normalized counts prior to log2 transform and return a DESeqTransform object
+#### plot to visualize counts for each sample
+```{r}
+normLog2Counts <- normTransform(combatCounts2)
+head(assays(normLog2Counts)[[1]])
+matrixOfNorm <- assay(normLog2Counts)
+boxplot(matrixOfNorm, las=2, names = colnames(normLog2Counts))
+```
+
+
+# With DESeq2 we can identify genes significantly changing across groups by comparing our models with and without our groups of interest using the results function. The likelihood ratio test (LRT) examines two models for the counts, a full model with a certain number of terms and a reduced model, in which some of the terms of the full model are removed. The test determines if the increased likelihood of the data using the extra terms in the full model is more than expected if those extra terms are truly zero.
+
+#### perform LRT to cluster genes into groups based on changes in gene expression levels across all samples. 
+```{r}
+# doing LRT against a reduced model that only contains the Biorep term, i.e. are the expression levels if you consider treatment, time and Biorep significantly different than if you only consider Biorep? 
+
+# perform DESeq with LRT before combat correction. 
+RNAddsLRT <- DESeq(RNAdds, test="LRT", reduced=~Biorep) #perform DESeq
+#extract results from DESeq objects 
+results(RNAddsLRT)
+
+# perform DESeq with LRT on combat corrected counts (with covar_mod info)
+RNAddsLRTCombat <- DESeq(combatCounts2, test="LRT", reduced=~Biorep) 
+# get DESeq results from LRT
+acrossGroups <- results(RNAddsLRTCombat)
+# filter for significant results.
+sigGroups <- acrossGroups[acrossGroups$padj < 0.0001 & !is.na(acrossGroups$padj), ]
+# get rlog normalized counts for sig changing genes
+sigMat <- assay(rlogcombatCounts2)[row.names(assay(rlogcombatCounts2)) %in% row.names(sigGroups), ]
+# make heatmap of sig changing genes' rlog normalized counts
+pheatmap(sigMat, scale="row", show_rownames = F) # scaled by row 
+pheatmap(sigMat, show_rownames = F, color=inferno(100), breaks=seq(0, 17, length.out = 100)) # not scaled 
+```
+
+*********************************
+*********************************
+
+# including RNA-seq datasets from samples from 1st biological replicate (LS_PDvsDoxo_1)
+
+#### add in LS_PDvsDoxo_1 samples' directory paths. 
+```{r}
+workdir <- "/lustre/fs4/risc_lab/scratch/jyeung/LS_PDvsDoxo_2/RNAseq/kallisto_02232023"
+samplenames <- c("Cycling_1", "d3-Doxo_1", "d14-Doxo_1", "d21-Doxo_VIAL1", "d3-Palbo_1", "d14-Palbo_1", "d21-Palbo_VIAL1", "d28-Palbo_VIAL1", "Cycling_2", "d3-Doxo_2", "d21-Doxo_VIAL2", "d3-Palbo_2", "d21-Palbo_VIAL2", "d28-Palbo_VIAL2", "day14_Cyc", "day10_Doxo",  "day14_Doxo", "day10_Palbo", "day14_Palbo")
+
+  for(i in 1:length(samplenames[15:19])){
+sampledir[i+14] <- paste0("/lustre/fs4/risc_lab/scratch/jyeung/LS_PDvsDoxo_1/RNAseq/kallisto_7272022", "/", samplenames[i+14], "/", "abundance.h5")
+  }
+names(sampledir) <- samplenames
+```
+
+#### reimport kallisto transcript abundance quantifications, this time including LS_PDvsDoxo_1 samples (object names will have an "all" at the end)
+```{r}
+txi.kallisto.all <- tximport(sampledir, type = "kallisto", tx2gene=tx2gene, ignoreAfterBar = T)
+head(txi.kallisto.all$counts)
+save(txi.kallisto.all, file="/lustre/fs4/risc_lab/scratch/jyeung/LS_PDvsDoxo_2/RNAseq/post_kallisto_analysis/workspaces/txi.kallisto.all.RData")
+```
+
+#### perform DESeq
+```{r}
+# generate design dataframe
+metaDataall <- data.frame(Biorep=c(rep("1", 8), rep("2", 6), rep("3", 5)), 
+         treatment=c("Cycling",rep("Doxo", 3), rep("Palbo", 4), "Cycling", rep("Doxo", 2),rep("Palbo", 3), "Cycling", rep("Doxo", 2), rep("Palbo", 2)), 
+         time=c(0, 3, 14, 21, 3, 14, 21, 28, 0, 3, 21,3, 21, 28, 0, 10, 14, 10, 14)
+         )
+         
+#import kallisto counts into a DESeq object with experimental design specificed
+RNAddsall <- DESeqDataSetFromTximport(txi.kallisto.all, metaDataall, ~Biorep+treatment+time)
+keep <- rowSums(counts(RNAddsall)) >= 50 # filter out rows with rowsum less than 30 to remove genes that aren't being expressed across samples. 
+RNAddsall <- RNAddsall[keep,]
+# perform DESeq
+RNAddsall <- DESeq(RNAddsall)
+
+write.csv(assay(RNAddsall), "/lustre/fs4/risc_lab/scratch/jyeung/LS_PDvsDoxo_2/RNAseq/post_kallisto_analysis/DESeq2_results/dds_raw_counts_matrix.csv") #save raw counts matrix
+
+# combine experimental design levels to make it easier to extract results for pairwise comparisons of samples
+RNAddsall$group <- factor(paste0(RNAddsall$treatment, RNAddsall$time))
+design(RNAddsall) <- ~ group
+# perform DESeq again
+RNAddsall <- DESeq(RNAddsall)
+resultsNames(RNAddsall)
+results(RNAddsall, contrast=c("group", "Doxo0", "Doxo14"))
+```
+```{r}
+# rlog normalization of RNAddsall
+RNAddsall_rlog <- rlog(RNAddsall)
+```
+
+
+### plot PCA plots of uncorrected counts
+```{r}
+#plot PCA
+PCA4 <- DESeq2::plotPCA(RNAddsall_rlog, intgroup=c("treatment", "time", "Biorep"))+theme_classic()+geom_point(size=5)+scale_colour_manual(values=c(Pcols, Dcols))
+PCA4
+```
+
+### plot sample correlation heatmap of uncorrected counts 
+```{r}
+sampleDistsall <- dist(t(assay(RNAddsall_rlog)))
+sampleDistsall <- as.dist(sampleDistsall)
+sampleDistMatrixall <- as.matrix(sampleDistsall)
+cor.matrix.all <-cor(sampleDistMatrixall, method="pearson") # Compute the correlation of the distance measure between pairwise samples. 
+
+row.names(metaDataall) <- samplenames
+hm_cols <- list(time=c("0"="#440154FF", "3"="#3B528BFF", "10"= "#4DA6A3", "14"="#21908CFF", "21"="#5DC863FF", "28"="#FDE725FF"), 
+                treatment=c("Cycling"="#F8766D", "Doxo"="#B3C543", "Palbo"="#E0ADCD"), 
+                Biorep=c("1"="orange", "2"="light blue", "3"="pink"))
+cor_allheatmap <- pheatmap(cor.matrix.all, annotation_row = metaDataall, annotation_colors = hm_cols)
+```
+
+#### do batch correction on all samples (includes LS_PDvsDoxo_1 & LS_PDvsDoxo_2 experiments)
+```{r}
+combatRawCountsall <- ComBat_seq(
+  # raw count matrix filtered for peaks with rowSums >=40 reads 
+    assay(RNAddsall), 
+  # batch info, i.e. different experiments
+    batch = metaDataall$Biorep, 
+  # biological info, i.e. time points
+    #covar_mod = metaDataall[ ,c("treatment", "time")] ,
+  group=NULL,
+  # full_mod = TRUE if you want to incorporate group conditons
+    full_mod = F)
+
+# reformat ComBat_seq output into a RangedSummarizedExperiment object 
+combatCountsall <- DESeqDataSetFromMatrix(combatRawCountsall, colData = metaDataall, design=~Biorep+treatment+time)
+# rlog normalize counts for visualization
+rlogcombatCountsall <- rlog(combatCountsall)
+# combine experimental design levels to make it easier to extract results for pairwise comparisons of samples
+combatCountsall$group <- factor(paste0(combatCountsall$treatment, combatCountsall$time))
+design(combatCountsall) <- ~ group
+# perform DESeq again
+combatCountsall <- DESeq(combatCountsall)
+resultsNames(combatCountsall)
+```
+### get log2FoldChange DESeq results for pairwise comparisons (with Wald Test) from Combat corrected counts
+```{r}
+LFCResultsall <- list()
+# comparison with Cycling as control
+for(i in 1:9){
+LFCResultsall[[i]] <- results(combatCountsall, contrast=c("group", as.character(levels(combatCountsall$group)[i+1]), as.character(levels(combatCountsall$group)[1])))
+LFCResultsall[[i]]$SYMBOL <- genes_anno_type[match(gsub('\\.[0-9]*$', '', row.names(LFCResultsall[[i]])), genes_anno_type$ensembl_id), ]$gene_id
+names(LFCResultsall)[[i]] <- paste(as.character(levels(combatCountsall$group)[i+1]), "vs", as.character(levels(combatCountsall$group)[1]))
+}
+# comparison with day3 Doxo as control
+for(i in 1:8){
+LFCResultsall[[i+9]] <- results(combatCountsall, contrast=c("group", as.character(levels(combatCountsall$group)[i+2]), as.character(levels(combatCountsall$group)[2])))
+LFCResultsall[[i+9]]$SYMBOL <- genes_anno_type[match(gsub('\\.[0-9]*$', '', row.names(LFCResultsall[[i+9]])), genes_anno_type$ensembl_id), ]$gene_id
+names(LFCResultsall)[[i+9]] <- paste(as.character(levels(combatCountsall$group)[i+2]),"vs", as.character(levels(combatCountsall$group)[2]))
+}
+# comparison with day3 Palbo as control
+for(i in c(3:5,7:10)){
+LFCResultsall[[i+17]] <- results(combatCountsall, contrast=c("group", as.character(levels(combatCountsall$group)[i]), as.character(levels(combatCountsall$group)[6])))
+LFCResultsall[[i+17]]$SYMBOL <- genes_anno_type[match(gsub('\\.[0-9]*$', '', row.names(LFCResultsall[[i+17]])), genes_anno_type$ensembl_id), ]$gene_id
+}
+# remove objects in list which are NULL 
+LFCResultsall <- LFCResultsall[!sapply(LFCResultsall,is.null)]
+# then name the last 5 objects in list which had day3 Palbo as control
+names(LFCResultsall)[18:24] <- paste(as.character(levels(combatCountsall$group)[c(3:5,7:10)]),"vs", as.character(levels(combatCountsall$group)[6]))
+
+# write DESeq2 results to csv files. 
+for(i in 1:length(LFCResultsall)){
+write.csv(LFCResultsall[[i]], file=paste0("/lustre/fs4/risc_lab/scratch/jyeung/LS_PDvsDoxo_2/RNAseq/post_kallisto_analysis/DESeq2_results/", gsub(" ", "_", names(LFCResultsall)[i]), "_Combatall.csv"))  
+}
+```
+
+### get log2FoldChange DESeq results for pairwise comparisons (with Wald Test) from uncorrected counts
+```{r}
+LFCResultsall <- list()
+# comparison with Cycling as control
+for(i in 1:9){
+LFCResultsall[[i]] <- results(RNAddsall, contrast=c("group", as.character(levels(RNAddsall$group)[i+1]), as.character(levels(RNAddsall$group)[1])))
+LFCResultsall[[i]]$SYMBOL <- genes_anno_type[match(gsub('\\.[0-9]*$', '', row.names(LFCResultsall[[i]])), genes_anno_type$ensembl_id), ]$gene_id
+names(LFCResultsall)[[i]] <- paste(as.character(levels(RNAddsall$group)[i+1]), "vs", as.character(levels(RNAddsall$group)[1]))
+}
+# comparison with day3 Doxo as control
+for(i in c(1:4,6:10)){
+LFCResultsall[[i+9]] <- results(RNAddsall, contrast=c("group", as.character(levels(RNAddsall$group)[i]), as.character(levels(RNAddsall$group)[5])))
+LFCResultsall[[i+9]]$SYMBOL <- genes_anno_type[match(gsub('\\.[0-9]*$', '', row.names(LFCResultsall[[i+9]])), genes_anno_type$ensembl_id), ]$gene_id
+names(LFCResultsall)[[i+9]] <- paste(as.character(levels(RNAddsall$group)[i]),"vs", as.character(levels(RNAddsall$group)[5]))
+}
+# comparison with day3 Palbo as control
+for(i in c(2:4,6:9)){
+LFCResultsall[[i+17]] <- results(RNAddsall, contrast=c("group", as.character(levels(RNAddsall$group)[i]), as.character(levels(RNAddsall$group)[10])))
+LFCResultsall[[i+17]]$SYMBOL <- genes_anno_type[match(gsub('\\.[0-9]*$', '', row.names(LFCResultsall[[i+17]])), genes_anno_type$ensembl_id), ]$gene_id
+}
+# remove objects in list which are NULL 
+LFCResultsall <- LFCResultsall[!sapply(LFCResultsall,is.null)]
+# then name the last 5 objects in list which had day3 Palbo as control
+names(LFCResultsall)[18:24] <- paste(as.character(levels(RNAddsall$group)[c(2:4,6:9)]),"vs", as.character(levels(RNAddsall$group)[10]))
+
+# write DESeq2 results to csv files. 
+for(i in 1:length(LFCResultsall)){
+write.csv(LFCResultsall[[i]], file=paste0("/lustre/fs4/risc_lab/scratch/jyeung/LS_PDvsDoxo_2/RNAseq/post_kallisto_analysis/DESeq2_results/", gsub(" ", "_", names(LFCResultsall)[i]), "_all.csv"))  
+}
+
+LFCResultsall[[25]] <- results(RNAddsall, contrast=c("group", "Doxo10",  "Palbo10"))
+LFCResultsall[[26]] <- results(RNAddsall, contrast=c("group", "Doxo14",  "Palbo14"))
+LFCResultsall[[27]] <- results(RNAddsall, contrast=c("group", "Doxo21",  "Palbo21"))
+LFCResultsall[[28]] <- results(RNAddsall, contrast=c("group", "Doxo3",  "Palbo3"))
+
+for(i in 25:28){
+LFCResultsall[[i]]$SYMBOL <- genes_anno_type[match(gsub('\\.[0-9]*$', '', row.names(LFCResultsall[[i]])), genes_anno_type$ensembl_id), ]$gene_id
+}
+names(LFCResultsall)[25:28] <- paste(c("Doxo10", "Doxo14", "Doxo21", "Doxo3"), "vs", c("Palbo10", "Palbo14", "Palbo21", "Palbo3"))
+```
+
+```{r}
+ggMAPlotsall <- list()
+for(i in 1:length(LFCResultsall)){
+  ggMAPlotsall[[i]] <- ggplotMA(LFCResultsall[[i]], genes=1:20, Title=names(LFCResultsall)[i], LFCthreshold = 2)
+}
+pdf(file="/lustre/fs4/risc_lab/scratch/jyeung/LS_PDvsDoxo_2/RNAseq/post_kallisto_analysis/DESeq2_results/Figures/ggMAPlotsall_LFCover2.pdf", width=16, height=8.5)
+for(i in 1:6){
+grid.arrange(grobs=ggMAPlotsall[seq(1, 28, by=4)[i]:(i*4)], ncol=2, nrow=2)
+}
+grid.arrange()
+dev.off()
+```
+
+```{r}
+PCA5 <- plotPCA(rlogcombatCountsall, intgroup=c("treatment", "time", "Biorep"))+theme_classic()+geom_point(size=5)+scale_colour_manual(values=c(Pcols, Dcols))
+PCA5
+```
+```{r}
+sampleDistscombatall <- dist(t(assay(rlogcombatCountsall)))
+sampleDistscombatall <- as.dist(1 - sampleDistscombatall)
+sampleDistcombatallMatrix <- as.matrix(sampleDistscombatall)
+cor.combatallmatrix <-cor(sampleDistcombatallMatrix, method="pearson")
+cor_combatallheatmap <- pheatmap(cor.combatallmatrix, annotation_row = metaDataall, annotation_colors = hm_cols)
+```
+
+# plot PCA plots and sample correlation matrices from before vs after Combat correction. 
+```{r}
+grid.arrange(grobs=list(PCA4, PCA5, cor_allheatmap[[4]], cor_combatallheatmap[[4]]), ncol=2, nrow=2)
+```
+
+
+```{r}
+combos <- vector("list", length=19)
+for(i in 1:length(combos)){
+  combos[[i]] <- vector("list", length=19)
+}
+
+for(i in 1:19){
+  for(j in 1:19){
+   combos[[i]][[j]]<- data.frame(one=i, two=j)
+  }
+  combos[[i]] <- do.call(rbind, combos[[i]])
+}
+combos <- do.call(rbind, combos)
+combos_uniq <- combos[!duplicated(apply(combos[,1:2], 1, function(row) paste(sort(row), collapse=""))),]
+combos_uniq <- combos_uniq[-c(which(combos_uniq[ ,1] == combos_uniq[ ,2])), ]
+
+# before combat correction
+pdf(file="/lustre/fs4/risc_lab/scratch/jyeung/LS_PDvsDoxo_2/RNAseq/post_kallisto_analysis/DESeq2_results/varianceQC_all.pdf", width=10, height=8)
+par(mfrow=c(4,4))
+for(i in 1:nrow(combos_uniq)){
+ plot(assay(RNAddsall_rlog)[ ,c(combos_uniq[i, 1],combos_uniq[i, 2])], pch=20, cex=0.1) 
+  }
+dev.off()
+
+# after combat correction
+pdf(file="/lustre/fs4/risc_lab/scratch/jyeung/LS_PDvsDoxo_2/RNAseq/post_kallisto_analysis/DESeq2_results/varianceQC_Combatall.pdf", width=10, height=8)
+par(mfrow=c(4,4))
+for(i in 1:nrow(combos_uniq)){
+ plot(assay(rlogcombatCountsall)[ ,c(combos_uniq[i, 1],combos_uniq[i, 2])], pch=20, cex=0.1) 
+  }
+dev.off()
+```
+
+### perform LRT to find significantly changing genes across all groups with combat corrected counts
+```{r, eval=F}
+combatCountsall <- DESeqDataSetFromMatrix(combatRawCountsall, colData = metaDataall, design=~Biorep+treatment+time)
+# doing LRT against a reduced model that only contains the Biorep term, i.e. are the expression levels if you consider treatment, time and Biorep significantly different than if you only consider Biorep? 
+RNAddsallLRT <- DESeq(combatCountsall, test="LRT", reduced=~Biorep) #perform DESeq
+#extract results from DESeq objects 
+results(RNAddsallLRT)
+
+# get DESeq results from LRT
+acrossGroups <- results(RNAddsallLRT)
+# filter for significant results.
+sigGroups <- acrossGroups[acrossGroups$padj < 0.0001 & !is.na(acrossGroups$padj), ]
+# get rlog normalized counts for sig changing genes
+sigMat <- assay(rlogcombatCountsall)[row.names(assay(rlogcombatCountsall)) %in% row.names(sigGroups), ]
+# make heatmap of sig changing genes' rlog normalized counts
+
+row.names(sigMat) <-  gsub('\\.[0-9]*$', '', row.names(sigMat))
+row.names(sigMat) <- genes_anno_type[match(row.names(sigMat), genes_anno_type$ensembl_id), ]$gene_id
+pheatmap(sigMat, scale="row", show_rownames = F, annotation_col = metaDataall, annotation_colors = hm_cols) # scaled by row 
+pheatmap(sigMat, show_rownames = F, color=inferno(100), breaks=seq(0, 17, length.out = 100)) # not scaled 
+```
+```{r}
+load("/lustre/fs4/risc_lab/scratch/jyeung/LS_PDvsDoxo_1/RNAseq/post_kallisto_analysis/workspaces/msigdbr_combos_andt2g_workspace.RData")
+```
+
+
+
+
+
+### perform LRT to find significantly changing genes across all groups with uncorrected counts. Based on my meeting with Viviana and Justin 3/1/2023, we decided that there is no need for batch correction. 
+```{r}
+RNAddsallLRT <- DESeqDataSetFromTximport(txi.kallisto.all, metaDataall, ~Biorep+treatment+time)
+keep <- rowSums(counts(RNAddsallLRT)) >= 50 # filter out rows with rowsum less than 30 to remove genes that aren't being expressed across samples. 
+RNAddsallLRT <- RNAddsallLRT[keep,]
+
+RNAddsallLRT <- DESeq(RNAddsallLRT, test="LRT", reduced=~Biorep) #perform DESeq
+#extract results from DESeq objects 
+results(RNAddsallLRT)
+
+# get DESeq results from LRT
+acrossGroups <- results(RNAddsallLRT)
+# filter for significant results (padj < 0.01)
+sigGroups <- acrossGroups[acrossGroups$padj < 0.05 & !is.na(acrossGroups$padj), ]
+```
+
+```{r}
+# filter for significant results with absolute log2FC > 2 across all pairwise comparisons between groups. 
+sigLFCResultsall <- list()
+for(i in 1:length(LFCResultsall)){
+  sigLFCResultsall[[i]] <- LFCResultsall[[i]][row.names(LFCResultsall[[i]]) %in% row.names(sigGroups) & abs(LFCResultsall[[i]]$log2FoldChange) > 2, ]
+  sigLFCResultsall[[i]]$LRT_padj <- acrossGroups[row.names(acrossGroups) %in% row.names(sigLFCResultsall[[i]]), ]$padj
+}
+names(sigLFCResultsall) <- names(LFCResultsall)
+
+# get list of genes with absolute log2FC > 2 increase relative to controls by extracting unique genes from sigLFCResultsall
+sigGenes <- list()
+for(i in 1:length(sigLFCResultsall[1:24])){
+sigGenes[[i]] <- row.names(sigLFCResultsall[1:24][[i]])
+}
+sigGenes <- unique(unlist(sigGenes))
+
+sigGenesUp <- list()
+for(i in 1:length(LFCResultsall[1:24])){
+  sigGenesUp[[i]] <- row.names(LFCResultsall[1:24][[i]][row.names(LFCResultsall[1:24][[i]]) %in% row.names(sigGroups) & LFCResultsall[1:24][[i]]$log2FoldChange > 2, ])
+}
+sigGenesUp <- unique(unlist(sigGenesUp))
+sigGenesUp <-  gsub('\\.[0-9]*$', '', sigGenesUp)
+sigGenesUp <- ifelse(genes_anno_type[match(sigGenesUp, genes_anno_type$ensembl_id), ]$gene_id %in% NA, sigGenesUp, genes_anno_type[match(sigGenesUp, genes_anno_type$ensembl_id), ]$gene_id)
+sigGenesUp  <- make.names(sigGenesUp, unique=T)
+
+sigGenesDown <- list()
+for(i in 1:length(LFCResultsall[1:24])){
+  sigGenesDown[[i]] <- row.names(LFCResultsall[1:24][[i]][row.names(LFCResultsall[1:24][[i]]) %in% row.names(sigGroups) & LFCResultsall[1:24][[i]]$log2FoldChange < -2, ])
+}
+sigGenesDown <- unique(unlist(sigGenesDown))
+sigGenesDown <-  gsub('\\.[0-9]*$', '', sigGenesDown)
+sigGenesDown <- ifelse(genes_anno_type[match(sigGenesDown, genes_anno_type$ensembl_id), ]$gene_id %in% NA, sigGenesDown, genes_anno_type[match(sigGenesDown, genes_anno_type$ensembl_id), ]$gene_id)
+sigGenesDown  <- make.names(sigGenesDown, unique=T)
+```
+```{r}
+# get rlog normalized counts for sig changing genes
+sigMat <- assay(rlogcombatCountsall)[row.names(assay(rlogcombatCountsall)) %in% sigGenes, ]
+# make heatmap of sig changing genes' rlog normalized counts
+
+# convert row names into gene symbol format, if there is no gene symbol for the gene, keep the ensembl id. 
+row.names(sigMat) <-  gsub('\\.[0-9]*$', '', row.names(sigMat))
+row.names(sigMat) <- ifelse(genes_anno_type[match(row.names(sigMat), genes_anno_type$ensembl_id), ]$gene_id %in% NA, row.names(sigMat), genes_anno_type[match(row.names(sigMat), genes_anno_type$ensembl_id), ]$gene_id)
+row.names(sigMat)  <- make.names(row.names(sigMat), unique=T)
+
+# reorder columns into sensible order based on time. 
+sigMat <- sigMat[ ,c(1,9,15,2,10,16,3,17,4,11,5,12,18,6,19,7,13,8,14)]
+
+pheatmap(sigMat, scale="row", show_rownames = F, annotation_col = metaDataall, annotation_colors = hm_cols, cluster_cols=F) # scaled by row 
+
+pheatmap(sigMat[row.names(sigMat) %in% sigGenesUp, ], scale="row", show_rownames = F, annotation_col = metaDataall, annotation_colors = hm_cols, cluster_cols=F)
+
+pheatmap(sigMat[row.names(sigMat) %in% sigGenesDown, ], scale="row", show_rownames = F, annotation_col = metaDataall, annotation_colors = hm_cols, cluster_cols=F)
+```
+
+```{r}
+# filter significantly changing genes for chromatin reorganization related genes. 
+CHROMATIN_REORGANIZATION_GENES <- genes_anno_type[genes_anno_type$entrezid %in% msigdbr_t2g_GO_BP[msigdbr_t2g_GO_BP$gs_name %in% "CHROMATIN ORGANIZATION", ]$entrez_gene, ]
+
+# plot heatmap for significantly changing chromatin reorganization related genes.
+pheatmap(sigMat[row.names(sigMat) %in% CHROMATIN_REORGANIZATION_GENES$gene_id, ], scale="row", show_rownames = T, annotation_col = metaDataall, annotation_colors = hm_cols, cluster_cols=F)
+```
+
+# cut tree formed by complete hierarchical clustering to 6 clusters then get genes from each of those clusters & do GO enrichment on them. 
+```{r}
+rowScaledMat <- t(scale(t(sigMat)))
+dists <- t(dist(rowScaledMat)) # convert to dist object for hclust function to accept
+hc <- hclust(dists) # do complete hierarchical clustering on scaled rlog transformed read counts
+clusters <- cutree(hc, k=7) # cut the tree to 8 clusters
+ordered_sigMat <- sigMat[hc$order, ] # order by matrix of sig genes' read counts by cluster
+
+# make dataframe for annotation clusters on heatmap
+anno_genes <- data.frame(row.names = row.names(ordered_sigMat),
+clusters_cutree8=as.factor(cutree(hc, k=8)[match(row.names(ordered_sigMat), names(cutree(hc,k=8)))]),
+clusters_cutree7=as.factor(clusters[match(row.names(ordered_sigMat), names(clusters))]))
+
+hm_cols$clusters_cutree15 <- c(brewer.pal(7, "Pastel1"), brewer.pal(8, "Pastel2"))
+names(hm_cols$clusters_cutree15) <- as.factor(1:15)
+hm_cols$clusters_cutree6 <- brewer.pal(6, "Set1")
+names(hm_cols$clusters_cutree6) <- as.factor(1:6)
+hm_cols$clusters_cutree7 <- brewer.pal(7, "Accent")
+names(hm_cols$clusters_cutree7) <- as.factor(1:7)
+hm_cols$clusters_cutree4 <- brewer.pal(4, "Pastel2")
+names(hm_cols$clusters_cutree4) <- as.factor(1:4)
+hm_cols$clusters_cutree5 <- brewer.pal(5, "Pastel1")
+names(hm_cols$clusters_cutree5) <- as.factor(1:5)
+hm_cols$clusters_cutree8 <- brewer.pal(8, "Set2")
+names(hm_cols$clusters_cutree8) <- as.factor(1:8)
+
+pheatmap(ordered_sigMat, scale="row", show_rownames = F, cluster_rows = T,  annotation_col = metaDataall, annotation_row = anno_genes, annotation_colors = hm_cols, cluster_cols=F, cutree_rows=8) # generate heatmap showing clusters generated by cutting tree. 
+```
+
+```{r}
+sigMat_sigGenesUp <- sigMat[row.names(sigMat) %in% sigGenesUp, ]
+row.names(sigMat_sigGenesUp) <- make.names(row.names(sigMat_sigGenesUp), unique=T)
+dists <- t(dist(t(scale(t(sigMat_sigGenesUp ))))) # convert to dist object for hclust function to accept
+hc <- hclust(dists) # do complete hierarchical clustering on scaled rlog transformed read counts
+clusters_sigGenesUp_4 <- cutree(hc, k=4) # cut the tree to 4 clusters
+
+# make dataframe for annotation clusters on heatmap
+anno_sigGenesUp <- data.frame(row.names = row.names(sigMat_sigGenesUp), clusters_cutree4=as.factor(clusters_sigGenesUp_4 [match(row.names(sigMat_sigGenesUp), names(clusters_sigGenesUp_4))]), 
+clusters_cutree6=as.factor(cutree(hc, k=6)[match(row.names(sigMat_sigGenesUp), names(cutree(hc,k=6)))]))
+
+pheatmap(sigMat_sigGenesUp, scale="row", show_rownames = F, cluster_rows = T,  annotation_col = metaDataall, annotation_row = anno_sigGenesUp, annotation_colors = hm_cols, cluster_cols=F, cutree_rows=4) # generate heatmap showing clusters generated by cutting tree. 
+```
+
+```{r}
+sigMat_sigGenesDown <- sigMat[row.names(sigMat) %in% sigGenesDown, ]
+row.names(sigMat_sigGenesDown) <- make.names(row.names(sigMat_sigGenesDown), unique=T)
+dists <- t(dist(t(scale(t(sigMat_sigGenesDown ))))) # convert to dist object for hclust function to accept
+hc <- hclust(dists) # do complete hierarchical clustering on scaled rlog transformed read counts
+clusters_sigGenesDown_5 <- cutree(hc, k=5) # cut the tree to 4 clusters
+sigMat_sigGenesDown <- sigMat_sigGenesDown[hc$order, ]
+# make dataframe for annotation clusters on heatmap
+anno_sigGenesDown <- data.frame(row.names = row.names(sigMat_sigGenesDown),
+clusters_cutree4=as.factor(cutree(hc, k=4)[match(row.names(sigMat_sigGenesDown), names(cutree(hc,k=4)))]),                          clusters_cutree5=as.factor(clusters_sigGenesDown_5[match(row.names(sigMat_sigGenesDown), names(clusters_sigGenesDown_5))]))
+
+pheatmap(sigMat_sigGenesDown, scale="row", show_rownames = F, cluster_rows = T,  annotation_col = metaDataall, annotation_row = anno_sigGenesDown, annotation_colors = hm_cols, cluster_cols=F, cutree_rows=4) # generate heatmap showing clusters generated by cutting tree.
+```
+
+
+```{r}
+for(i in 1:length(1:7)){
+  print(i)
+  print(row.names(anno_genes[anno_genes$clusters_cutree7 == i, ]))
+}
+
+for(i in 1:length(1:6)){
+  print(i)
+  print(row.names(anno_sigGenesUp[anno_sigGenesUp$clusters_cutree6 == i, ]))
+}
+```
+
+```{r}
+pdf(file="/lustre/fs4/risc_lab/scratch/jyeung/LS_PDvsDoxo_2/RNAseq/post_kallisto_analysis/Figures/ordered_sigMat_sigMat_sigGenesUp_sigMat_sigGenesDown.pdf", width=11.5, height=8)
+
+pheatmap(ordered_sigMat, scale="row", show_rownames = F, cluster_rows = T,  annotation_col = metaDataall, annotation_row = anno_genes, annotation_colors = hm_cols, cluster_cols=F, cutree_rows=8) # generate heatmap showing clusters generated by cutting tree. 
+
+pheatmap(sigMat_sigGenesUp, scale="row", show_rownames = F, cluster_rows = T,  annotation_col = metaDataall, annotation_row = anno_sigGenesUp, annotation_colors = hm_cols, cluster_cols=F, cutree_rows=4)
+
+pheatmap(sigMat_sigGenesDown, scale="row", show_rownames = F, cluster_rows = T,  annotation_col = metaDataall, annotation_row = anno_sigGenesDown, annotation_colors = hm_cols, cluster_cols=F, cutree_rows=4) # generate heatmap showing clusters generated by cutting tree.
+
+dev.off()
+```
+
+```{r}
+# unique combinations of comparing across different groups for Palbo
+combos <- vector("list", length=4)
+for(i in 1:length(combos)){
+  combos[[i]] <- vector("list", length=4)
+}
+# make dataframe of combinations
+for(i in 1:4){
+  for(j in 1:4){
+   combos[[i]][[j]]<- data.frame(one=as.numeric(i+20), two=as.numeric(j+20))
+  }
+  combos[[i]] <- do.call(rbind, combos[[i]]) # unlist into 1 dataframe per list object
+}
+combos <- do.call(rbind, combos) # make whole list into 1 dataframe
+# remove rows that are not unique combinations (e.g. 1,2 and 2,1 are the same combination)
+combos_uniq <- combos[!duplicated(apply(combos[,1:2], 1, function(row) paste(sort(row), collapse=""))),]
+# remove duplicate combinations since you are just comparing the same sample to itself (e.g. 1,1 or 2,2)
+combos_uniq <- combos_uniq[-c(which(combos_uniq[ ,1] == combos_uniq[ ,2])), ]
+```
+
+# 3-09-2023: Finding genes that are going from off to on (large log2FC increase relative to quiescent and/or cycling controls)
+
+```{r}
+sigGenes_offtoon <- list()
+for(i in 1:length(LFCResultsall[1:24])){
+sigGenes_offtoon[[i]] <- LFCResultsall[1:24][[i]][LFCResultsall[1:24][[i]]$padj < 0.01 & !is.na(LFCResultsall[1:24][[i]]$padj), ]
+sigGenes_offtoon[[i]] <- sigGenes_offtoon[[i]][sigGenes_offtoon[[i]]$log2FoldChange > 2, ]
+}
+names(sigGenes_offtoon) <- names(LFCResultsall[1:24])
+
+
+NormCountsMat <- counts(RNAddsall, normalized=T)
+NormCountsMat_ctrls <- NormCountsMat[ ,grep("d3|Cyc", colnames(NormCountsMat))]
+counts_sigGenes_offtoon <- list()
+for(i in 1:ncol(NormCountsMat_ctrls)){
+ counts_sigGenes_offtoon[[i]] <- NormCountsMat_ctrls[NormCountsMat_ctrls[ ,i] <= 10, i]
+}
+names(counts_sigGenes_offtoon) <- colnames(NormCountsMat_ctrls)
+
+counts_sigGenes_offtoon$Cycling_nr <- counts_sigGenes_offtoon$Cycling_1[names(counts_sigGenes_offtoon$Cycling_1) %in% names(counts_sigGenes_offtoon$Cycling_2)]
+counts_sigGenes_offtoon$Cycling_nr <- names(counts_sigGenes_offtoon$Cycling_nr[names(counts_sigGenes_offtoon$Cycling_nr) %in% names(counts_sigGenes_offtoon$day14_Cyc)])
+
+counts_sigGenes_offtoon$d3_Palbo_nr <- names(counts_sigGenes_offtoon$`d3-Palbo_1`[names(counts_sigGenes_offtoon$`d3-Palbo_1`) %in% names(counts_sigGenes_offtoon$`d3-Palbo_2`)])
+
+counts_sigGenes_offtoon$d3_Doxo_nr <- names(counts_sigGenes_offtoon$`d3-Doxo_1`[names(counts_sigGenes_offtoon$`d3-Doxo_1`) %in% names(counts_sigGenes_offtoon$`d3-Doxo_2`)])
+
+for(i in 1:9){
+  sigGenes_offtoon[[i]] <- sigGenes_offtoon[[i]][row.names(sigGenes_offtoon[[i]]) %in% counts_sigGenes_offtoon$Cycling_nr, ]
+}
+for(i in 10:17){
+  sigGenes_offtoon[[i]] <- sigGenes_offtoon[[i]][row.names(sigGenes_offtoon[[i]]) %in% counts_sigGenes_offtoon$d3_Doxo_nr, ]
+}
+for(i in 18:24){
+  sigGenes_offtoon[[i]] <- sigGenes_offtoon[[i]][row.names(sigGenes_offtoon[[i]]) %in% counts_sigGenes_offtoon$d3_Palbo_nr, ]
+}
+
+# plot counts of off to on genes over time
+
+```
+
+
+
+```{r}
+commongenes <- function(combos_uniq, LFCResultslist, direction, LFCvalue){
+commongenes <- list()
+  for(i in 1:nrow(combos_uniq)){
+    if(direction %in% "greater than"){
+group1 <- LFCResultslist[[combos_uniq[i,1]]][LFCResultslist[[combos_uniq[i,1]]]$log2FoldChange > LFCvalue, ]
+group2 <- LFCResultslist[[combos_uniq[i,2]]][LFCResultslist[[combos_uniq[i,2]]]$log2FoldChange > LFCvalue,] 
+    }else if(direction %in% "less than"){
+group1 <- LFCResultslist[[combos_uniq[i,1]]][LFCResultslist[[combos_uniq[i,1]]]$log2FoldChange < -(LFCvalue), ]
+group2 <- LFCResultslist[[combos_uniq[i,2]]][LFCResultslist[[combos_uniq[i,2]]]$log2FoldChange < -(LFCvalue),] 
+    }else{
+group1 <- LFCResultslist[[combos_uniq[i,1]]]
+group2 <- LFCResultslist[[combos_uniq[i,2]]]
+    }
+    
+commongenes[[i]] <- group1[row.names(group1) %in% row.names(group2), ] 
+
+names(commongenes)[[i]] <- paste(names(LFCResultslist)[[combos_uniq[i,1]]], "also in", names(LFCResultslist)[[combos_uniq[i,2]]])    
+  }
+commongenes <- commongenes[!sapply(commongenes,is.null)]
+return(commongenes)
+}
+```
+
+
+```{r}
+write.csv(anno_genes, "/lustre/fs4/risc_lab/scratch/jyeung/LS_PDvsDoxo_2/RNAseq/post_kallisto_analysis/DESeq2_results/anno_genes.csv")
+```
+
+```{r}
+# genes that are consistently different relative to day 3 Palbo control over time. 
+commonPgenesUp <- commongenes(combos_uniq=combos_uniq, sigLFCResultsall, direction="greater than", LFCvalue=2)
+commonPgenesUp <- unique(row.names(do.call(rbind, commonPgenesUp)))
+commonPgenesUp <- gsub('\\.[0-9]*$', '', commonPgenesUp)
+commonPgenesUp <- ifelse(genes_anno_type[match(commonPgenesUp, genes_anno_type$ensembl_id), ]$gene_id %in% NA, commonPgenesUp, genes_anno_type[match(commonPgenesUp, genes_anno_type$ensembl_id), ]$gene_id)
+
+pheatmap(sigMat[row.names(sigMat) %in% commonPgenesUp, ], scale="row", show_rownames = T, annotation_col = metaDataall, annotation_row=anno_genes, annotation_colors = hm_cols, cluster_cols=F)
+
+commonPgenesDown <- commongenes(combos_uniq=combos_uniq, sigLFCResultsall, direction="less than", LFCvalue=2)
+commonPgenesDown <- unique(row.names(do.call(rbind, commonPgenesDown)))
+commonPgenesDown <- gsub('\\.[0-9]*$', '', commonPgenesDown)
+commonPgenesDown <- ifelse(genes_anno_type[match(commonPgenesDown, genes_anno_type$ensembl_id), ]$gene_id %in% NA, commonPgenesDown, genes_anno_type[match(commonPgenesDown, genes_anno_type$ensembl_id), ]$gene_id)
+
+pheatmap(sigMat[row.names(sigMat) %in% commonPgenesDown, ], scale="row", show_rownames = T, annotation_col = metaDataall, annotation_row=anno_genes, annotation_colors = hm_cols, cluster_cols=F)
+
+commonPgenes <- commongenes(combos_uniq=combos_uniq, sigLFCResultsall, direction="all", LFCvalue=2)
+commonPgenes <- unique(row.names(do.call(rbind, commonPgenes)))
+commonPgenes <- gsub('\\.[0-9]*$', '', commonPgenes)
+commonPgenes <- ifelse(genes_anno_type[match(commonPgenes, genes_anno_type$ensembl_id), ]$gene_id %in% NA, commonPgenes, genes_anno_type[match(commonPgenes, genes_anno_type$ensembl_id), ]$gene_id)
+
+pheatmap(sigMat[row.names(sigMat) %in% commonPgenes, ], scale="row", show_rownames = F, annotation_col = metaDataall, annotation_row=anno_genes, annotation_colors = hm_cols, cluster_cols=F)
+
+pheatmap(sigMat[row.names(sigMat) %in% commonPgenes, ], scale="row", show_rownames = F, annotation_col = metaDataall, annotation_row=anno_genes, annotation_colors = hm_cols, cluster_cols=F, cutree_rows = 6)
+```
+```{r}
+sigMat_commonPgenes <- sigMat[row.names(sigMat) %in% commonPgenes, ]
+rowScaledMat_commonPgenes <- t(scale(t(sigMat_commonPgenes)))
+dists <- t(dist(rowScaledMat_commonPgenes)) # convert to dist object for hclust function to accept
+hc <- hclust(dists) # do complete hierarchical clustering on scaled rlog transformed read counts
+clusters_commonPgenes_15 <- cutree(hc, k=15) # cut the tree to 15 clusters
+clusters_commonPgenes_6 <- cutree(hc, k=6) # cut the tree to 6 clusters
+sigMat_commonPgenes <- sigMat_commonPgenes[hc$order, ] # order by matrix of sig genes' read counts by cluster
+
+# make dataframe for annotation clusters on heatmap
+anno_commonPgenes <- data.frame(row.names = row.names(sigMat_commonPgenes), clusters_cutree15=as.factor(clusters_commonPgenes_15[match(row.names(sigMat_commonPgenes), names(clusters_commonPgenes_15))]), clusters_cutree6=as.factor(clusters_commonPgenes_6[match(row.names(sigMat_commonPgenes), names(clusters_commonPgenes_6))]))
+
+pheatmap(sigMat_commonPgenes, scale="row", show_rownames = F, cluster_rows = T, annotation_row = anno_commonPgenes, annotation_col = metaDataall, annotation_colors = hm_cols, cluster_cols=F) # generate heatmap showing clusters generated by cutting tree. 
+```
+
+```{r}
+changingPgenes <- list()
+  for(i in 1:nrow(combos_uniq)){
+   changingPgenes[[i]] <- sigLFCResultsall[[combos_uniq[i,1]]][!(row.names(sigLFCResultsall[[combos_uniq[i,1]]]) %in% row.names(sigLFCResultsall[[combos_uniq[i,2]]])), ] 
+   names(changingPgenes)[[i]] <- paste(names(sigLFCResultsall)[[combos_uniq[i,1]]], "not in", names(sigLFCResultsall)[[combos_uniq[i,2]]])
+  }
+changingPgenes <- changingPgenes [!sapply(changingPgenes,is.null)]
+changingPgenes <- unique(row.names(do.call(rbind, changingPgenes)))
+
+changingPgenes <- gsub('\\.[0-9]*$', '', changingPgenes)
+changingPgenes <- ifelse(genes_anno_type[match(changingPgenes, genes_anno_type$ensembl_id), ]$gene_id %in% NA, changingPgenes, genes_anno_type[match(changingPgenes, genes_anno_type$ensembl_id), ]$gene_id)
+
+pheatmap(sigMat[row.names(sigMat) %in% changingPgenes, ], scale="row", show_rownames = F, annotation_col = metaDataall, annotation_row=anno_genes, annotation_colors = hm_cols, cluster_cols=F, cluster_rows=T)
+```
+
+```{r}
+# unique combinations of comparing across different groups for Doxo
+combos <- vector("list", length=4)
+for(i in 1:length(combos)){
+  combos[[i]] <- vector("list", length=4)
+}
+# make dataframe of combinations
+for(i in 1:3){
+  for(j in 1:3){
+   combos[[i]][[j]]<- data.frame(one=as.numeric(i+10), two=as.numeric(j+10))
+  }
+  combos[[i]] <- do.call(rbind, combos[[i]]) # unlist into 1 dataframe per list object
+}
+combos <- do.call(rbind, combos) # make whole list into 1 dataframe
+# remove rows that are not unique combinations (e.g. 1,2 and 2,1 are the same combination)
+combos_uniq <- combos[!duplicated(apply(combos[,1:2], 1, function(row) paste(sort(row), collapse=""))),]
+# remove duplicate combinations since you are just comparing the same sample to itself (e.g. 1,1 or 2,2)
+combos_uniq <- combos_uniq[-c(which(combos_uniq[ ,1] == combos_uniq[ ,2])), ]
+```
+
+```{r}
+# genes that are consistently different relative to day 3 Doxo control over time. 
+commonDgenesUp <- commongenes(combos_uniq=combos_uniq, sigLFCResultsall, direction="greater than", LFCvalue=2)
+commonDgenesUp <- unique(row.names(do.call(rbind, commonDgenesUp)))
+commonDgenesUp <- gsub('\\.[0-9]*$', '', commonDgenesUp)
+commonDgenesUp <- ifelse(genes_anno_type[match(commonDgenesUp, genes_anno_type$ensembl_id), ]$gene_id %in% NA, commonDgenesUp, genes_anno_type[match(commonDgenesUp, genes_anno_type$ensembl_id), ]$gene_id)
+
+pheatmap(sigMat[row.names(sigMat) %in% commonDgenesUp, ], scale="row", show_rownames = T, annotation_col = metaDataall, annotation_row=anno_genes, annotation_colors = hm_cols, cluster_cols=F)
+
+commonDgenesDown <- commongenes(combos_uniq=combos_uniq, sigLFCResultsall, direction="less than", LFCvalue=2)
+commonDgenesDown <- unique(row.names(do.call(rbind, commonDgenesDown)))
+commonDgenesDown <- gsub('\\.[0-9]*$', '', commonDgenesDown)
+commonDgenesDown <- ifelse(genes_anno_type[match(commonDgenesDown, genes_anno_type$ensembl_id), ]$gene_id %in% NA, commonDgenesDown, genes_anno_type[match(commonDgenesDown, genes_anno_type$ensembl_id), ]$gene_id)
+
+pheatmap(sigMat[row.names(sigMat) %in% commonDgenesDown, ], scale="row", show_rownames = T, annotation_col = metaDataall, annotation_row=anno_genes, annotation_colors = hm_cols, cluster_cols=F)
+
+commonDgenes <- commongenes(combos_uniq=combos_uniq, sigLFCResultsall, direction="all", LFCvalue=2)
+commonDgenes <- unique(row.names(do.call(rbind, commonDgenes)))
+commonDgenes <- gsub('\\.[0-9]*$', '', commonDgenes)
+commonDgenes <- ifelse(genes_anno_type[match(commonDgenes, genes_anno_type$ensembl_id), ]$gene_id %in% NA, commonDgenes, genes_anno_type[match(commonDgenes, genes_anno_type$ensembl_id), ]$gene_id)
+
+pheatmap(sigMat[row.names(sigMat) %in% commonDgenes, ], scale="row", show_rownames = F, annotation_col = metaDataall, annotation_row=anno_genes, annotation_colors = hm_cols, cluster_cols=F)
+```
+
+```{r}
+changingDgenes <- list()
+  for(i in 1:nrow(combos_uniq)){
+   changingDgenes[[i]] <- sigLFCResultsall[[combos_uniq[i,1]]][!(row.names(sigLFCResultsall[[combos_uniq[i,1]]]) %in% row.names(sigLFCResultsall[[combos_uniq[i,2]]])), ] 
+   names(changingDgenes)[[i]] <- paste(names(sigLFCResultsall)[[combos_uniq[i,1]]], "not in", names(sigLFCResultsall)[[combos_uniq[i,2]]])
+  }
+changingDgenes <- changingDgenes [!sapply(changingDgenes,is.null)]
+changingDgenes <- unique(row.names(do.call(rbind, changingDgenes)))
+
+changingDgenes <- gsub('\\.[0-9]*$', '', changingDgenes)
+changingDgenes <- ifelse(genes_anno_type[match(changingDgenes, genes_anno_type$ensembl_id), ]$gene_id %in% NA, changingDgenes, genes_anno_type[match(changingDgenes, genes_anno_type$ensembl_id), ]$gene_id)
+
+pheatmap(sigMat[row.names(sigMat) %in% changingDgenes, ], scale="row", show_rownames = F, annotation_col = metaDataall, annotation_row=anno_genes, annotation_colors = hm_cols, cluster_cols=F, cluster_rows=T)
+```
+
+
+### determining optimal number of k-means clusters using NbClust package
+#### https://www.listendata.com/2017/04/how-to-standardize-variable-in-regression.html
+```{r}
+rowScaledMat <- t(scale(t(sigMat)))
+# rowScaledMat_ensembl <- t(scale(t(sigMat_ensembl)))
+nbclust <- NbClust::NbClust(rowScaledMat, method="kmeans", distance = "euclidean", min.nc = 2, max.nc = 12, index = "silhouette")
+```
+
+### determining optimal number of k-means clusters using the Elbow method
+#### https://rpubs.com/Anushka_01/639427
+```{r}
+library(ggfortify)
+library(cluster)
+k.max <- 15
+wss <- sapply(1:k.max, 
+              function(k){kmeans(rowScaledMat, k, nstart=50,iter.max = 250, algorithm = "Lloyd")$tot.withinss})
+#Visualization of the optimal number of cluster
+plot(1:k.max, wss,
+     type="b", pch = 19, frame = FALSE, 
+     xlab="Number of clusters K",
+     ylab="Total within-clusters sum of squares")
+k <- kmeans(rowScaledMat, 4, nstart=50,iter.max = 250, algorithm = "Lloyd")
+#based on this plot, it looks like the "elbow" is at 4. 
+```
+
+#### PCA plot of rlog transformed counts of significantly changing genes, colored by kmeans cluster they belong to (using cluster number of 3 & 4)
+##### source: https://cran.r-project.org/web/packages/ggfortify/vignettes/plot_pca.html 
+```{r}
+autoplot(prcomp(sigMat, scale. = TRUE), data=sigMat, colour=kmeans(rowScaledMat, 3, nstart=50,iter.max = 250, algorithm = "Lloyd")$cluster, size=0.1)+theme_classic()+ggtitle("Kmeans clustering of significantly changing genes' counts")+theme(title=element_text(size=8))+facet_wrap(kmeans(rowScaledMat, 3, nstart=50,iter.max = 250, algorithm = "Lloyd")$cluster)
+
+autoplot(prcomp(sigMat, scale. = TRUE), data=sigMat, colour=kmeans(rowScaledMat, 4, nstart=50,iter.max = 250, algorithm = "Lloyd")$cluster, size=0.1)+theme_classic()+ggtitle("Kmeans clustering of significantly changing genes' counts")+theme(title=element_text(size=8))+facet_wrap(kmeans(rowScaledMat, 4, nstart=50,iter.max = 250, algorithm = "Lloyd")$cluster)
+```
+
+##### general stats of significantly changing genes
+```{r}
+genes <- import("/lustre/fs4/risc_lab/store/jyeung/references/gencode.v41.GRCh38.p13.annotation.gtf") # get genomic coordinates from Ensembl annotation package
+genes$gene_id <- gsub('\\.[0-9]*$', '', genes$gene_id)
+genes <- genes[genes$type %in% "gene", ]
+
+#barplot of which chromosomes significantly changing genes lie
+chr <- as.factor(paste0("chr",1:22))
+all_genes <- sapply(chr, function(chr){length(genes[seqnames(genes) %in% chr,])})
+sig_genes <- sapply(chr, function(chr){length(seqnames(genes[genes$gene_id %in% row.names(ordered_sigMat),])[seqnames(genes[genes$gene_id %in% row.names(ordered_sigMat),]) %in% chr])})
+par(mfrow=c(1,2))
+barplot(sig_genes, names.arg=chr, main="Number of significantly changing genes per chromosome", xlab="Chromosome", ylab="Number of genes")
+barplot(sig_genes/all_genes, names.arg=chr, main="% of significantly changing genes per chromosome", xlab="Chromosome", ylab="sig genes/all genes")
+
+# filter for noncoding genes 
+ncgenes <- genes[!genes$gene_type %in% "protein_coding"]  
+
+plot_grid(
+#barplot of number of non-protein coding genes significantly changing across conditions.
+ggplot(data=as.data.frame(ncgenes[ncgenes$gene_id %in% row.names(sigMat)]), aes(x=gene_type))+geom_bar()+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))+ggtitle("Non protein-coding genes significantly changing across conditions"),
+
+#barplot of all non-protein coding genes expressed + with number of significantly changing genes filled with blue. 
+ggplot(data=as.data.frame(ncgenes[ncgenes$gene_id %in% row.names(rlogMatrix)]), aes(x=gene_type))+geom_bar()+theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))+ggtitle("All Non protein-coding genes expressed"),
+align="hv"
+)
+```
+
+
+```{r}
+sessionInfo()
+```
+
+
+```{r}
+metaDataall
+```
